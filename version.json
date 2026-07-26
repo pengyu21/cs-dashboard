@@ -1,10 +1,10 @@
 {
-  "version": "1.0.0",
-  "notes": "카카오 로그인 재시도 + 자동 업데이트 도입",
+  "version": "1.0.1",
+  "notes": "카카오 로그인 재시도 + 버전 표시",
   "files": [
     {
       "name": "total.py",
-      "sha256": "e07550141b930dbf7b7fd0ebd0021e47e2464d768409aa2b26c352bccb482f4f"
+      "sha256": "096584e5b60e25cd7c126b3465da14c1f7631c3f3def20e303d7c1530a79742b"
     },
     {
       "name": "run_dashboard.py",

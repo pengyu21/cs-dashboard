@@ -76,6 +76,17 @@ def _load_secrets() -> dict:
 SECRETS: Dict = _load_secrets()
 
 
+def app_version() -> str:
+    """런처가 깃허브에서 받아둔 코드 버전(app/version.json). 없으면 '개발'."""
+    for p in (BASE_DIR / "app" / "version.json", BASE_DIR / "version.json"):
+        try:
+            if p.exists():
+                return json.loads(p.read_text(encoding="utf-8")).get("version", "")
+        except Exception:
+            pass
+    return "개발"
+
+
 def account(key: str) -> tuple:
     """secrets.json 의 accounts[key] → (아이디, 비밀번호). 없으면 빈 문자열."""
     a = SECRETS.get("accounts", {}).get(key) or {}
@@ -2633,6 +2644,8 @@ class App(tk.Tk):
         h.pack(fill="x", padx=16, pady=(14, 6))
         tk.Label(h, text="🏥 상담 통합 대시보드", font=FONT_TITLE,
                  bg="#F4F5F7", fg="#222").pack(side="left")
+        tk.Label(h, text=f"v{app_version()}", font=("맑은 고딕", 9),
+                 bg="#F4F5F7", fg="#ADB5BD").pack(side="left", padx=(8, 0), pady=(8, 0))
         self.alert = tk.Label(h, text="", font=FONT_BOLD, bg="#F4F5F7", padx=12,
                               cursor="hand2")
         self.alert.pack(side="right")
