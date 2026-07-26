@@ -1,0 +1,13 @@
+# ⚠ 공개 저장소입니다 — 아래 파일은 절대 올라가면 안 됩니다.
+secrets.json
+service_account.json
+credentials.json
+update.json
+*.log
+*.log.1
+data/
+chrome_profile*/
+dist/
+build/
+__pycache__/
+*.pyc

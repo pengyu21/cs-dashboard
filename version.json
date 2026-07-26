@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "notes": "카카오 로그인 재시도 + 자동 업데이트 도입",
+  "files": [
+    {
+      "name": "total.py",
+      "sha256": "e07550141b930dbf7b7fd0ebd0021e47e2464d768409aa2b26c352bccb482f4f"
+    },
+    {
+      "name": "run_dashboard.py",
+      "sha256": "3c5f6df8f7b3945f1bdb2728e7475cc25a6c0460b8480a0169207e0a3eebb57d"
+    }
+  ]
+}

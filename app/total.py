@@ -1,0 +1,3177 @@
+# -*- coding: utf-8 -*-
+"""
+성형외과 상담 통합 대시보드 (셀레니움 수집 + 구글시트 DB + Tkinter GUI · 단일 파일)
+================================================================================
+바비톡 · 강남언니 · 네이버지도 · 여신티켓 · 온라인상담 · 온라인예약 · 카카오톡
+→ 셀레니움이 채널을 순회하며 새 상담을 수집 → 저장(구글시트 또는 로컬)
+→ '오늘 날짜 중 아직 확인 안 한' 상담을 한 화면에 모아 보여주는 토탈 대시보드.
+
+실행 (추가 설치 불필요):
+    python total.py
+
+동작 모드:
+    DEMO_MODE = True   → 셀레니움 없이 가짜 유입 생성(테스트용)
+    DEMO_MODE = False  → 각 채널을 셀레니움으로 실제 수집(_scrape 구현 필요)
+
+저장 백엔드:
+    SHEET_URL 비어있음 → 로컬 SQLite (data/consultations.db)
+    SHEET_URL 입력됨   → 구글시트 (service_account.json 으로 연결)
+                         ※ 시트를 service account 이메일에 '편집자'로 공유해야 함
+
+구조:
+    [설정] · [모델] · [셀레니움] · [채널×7] · [데모] · [저장소] · [수집] · [화면]
+
+새 채널 추가:  '채널' 영역에 클래스 하나(@register) 추가 + ENABLED 한 줄.
+실제 연동:     각 채널의 LOGIN_URL/LIST_URL/_scrape() 채우기 → DEMO_MODE=False.
+"""
+from __future__ import annotations
+
+import json
+import os
+import random
+import re
+import shutil
+import socket
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+import tkinter as tk
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from tkinter import messagebox, ttk
+from typing import Dict, List, Optional, Type
+
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent   # exe 옆 (DB·크롬프로필 등 쓰기용)
+    BUNDLE_DIR = Path(sys._MEIPASS)                    # exe 안에 넣은 읽기전용 파일
+else:
+    BASE_DIR = BUNDLE_DIR = Path(__file__).resolve().parent
+
+# ══════════════════════════════════════════════════════════════
+# [설정]  운영 중 자주 바꾸는 값
+# ══════════════════════════════════════════════════════════════
+DEMO_MODE = False                      # True=가짜유입 / False=셀레니움 실제수집
+
+
+# ── 비밀값 로딩 (secrets.json) ─────────────────────────────────
+#   이 코드는 깃허브 공개 저장소로 자동 업데이트되므로 계정·비밀번호·토큰을
+#   코드 안에 두지 않는다. 값은 secrets.json 에서만 읽는다.
+#   찾는 순서: ① exe(또는 total.py) 옆  ② exe 안에 넣어둔 것
+#   → 비밀번호가 바뀌면 exe 옆 secrets.json 만 고치면 되고 재빌드가 필요 없다.
+def _load_secrets() -> dict:
+    for p in (BASE_DIR / "secrets.json", BUNDLE_DIR / "secrets.json"):
+        try:
+            if p.exists():
+                return json.loads(p.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[설정] {p} 읽기 실패: {e}")
+    print("[설정] secrets.json 을 찾지 못했습니다 — 로그인·알림이 동작하지 않습니다.")
+    return {}
+
+
+SECRETS: Dict = _load_secrets()
+
+
+def account(key: str) -> tuple:
+    """secrets.json 의 accounts[key] → (아이디, 비밀번호). 없으면 빈 문자열."""
+    a = SECRETS.get("accounts", {}).get(key) or {}
+    return a.get("id", ""), a.get("pw", "")
+
+
+# 구글시트 (비워두면 로컬 SQLite 사용). 예: https://docs.google.com/spreadsheets/d/XXXX/edit
+SHEET_URL = ""
+SHEET_TAB = "상담목록"
+# service_account.json: exe 옆에 있으면 그걸 먼저 쓴다(키 교체 시 재빌드 불필요)
+SERVICE_ACCOUNT_FILE = (BASE_DIR / "service_account.json"
+                        if (BASE_DIR / "service_account.json").exists()
+                        else BUNDLE_DIR / "service_account.json")
+
+# 채널별 대시보드용 구글시트 (탭 이름 = 채널별 SHEET_TAB)
+GSHEET_URL = SECRETS.get("gsheet_url", "")
+
+# 웹 대시보드(Apps Script 웹앱) — GUI '웹 대시보드' 버튼이 브라우저로 연다
+WEBAPP_URL = SECRETS.get("webapp_url", "")
+
+DB_PATH = BASE_DIR / "data" / "consultations.db"           # 로컬 백엔드용
+CHROME_PROFILE_DIR = BASE_DIR / "chrome_profiles"          # 채널별 로그인 유지
+HEADLESS = True                        # 수집 시 브라우저 숨김(로그인 때는 자동으로 보임)
+
+COLLECT_INTERVAL_SEC = 180             # 수집기 순회 주기(초) · run_dashboard.py 와 별개
+GUI_REFRESH_SEC = 30                    # GUI가 시트를 다시 읽어 화면 갱신하는 주기(초)
+
+# ── 텔레그램 알림 (새 상담 / 수집 실패) ──────────────────────────
+#   @BotFather 로 봇 생성 → 토큰, 봇과 대화 후 @userinfobot 으로 Chat ID 확인.
+#   여러 명이 받으려면 그룹에 봇 초대 후 그룹 chat_id 사용.
+#   토큰이 비어있으면 알림 기능 전체가 조용히 꺼진다.
+TELEGRAM_TOKEN = SECRETS.get("telegram_token", "")
+TELEGRAM_CHAT_ID = SECRETS.get("telegram_chat_id", "")   # 그룹 'CS알림'
+TELEGRAM_FAIL_RENOTIFY_MIN = 60        # 같은 채널 수집실패 재알림 최소 간격(분)
+
+FONT = ("맑은 고딕", 10)
+FONT_BOLD = ("맑은 고딕", 10, "bold")
+FONT_TITLE = ("맑은 고딕", 16, "bold")
+
+ENABLED: Dict[str, bool] = {
+    "babitalk": True,
+    "gangnamunni": True,
+    "naver_map": True,
+    "yeosin_ticket": True,
+    "online_consult": True,
+    "online_booking": True,
+    "kakaotalk": True,
+}
+
+
+# ══════════════════════════════════════════════════════════════
+# [모델]  공통 상담 데이터 (채널마다 형식이 달라도 이걸로 통일)
+# ══════════════════════════════════════════════════════════════
+@dataclass
+class Consultation:
+    id: str                       # 전역 고유 ID  (예: "babitalk:12345")
+    channel_key: str
+    external_id: str
+    customer_name: str
+    contact: str = ""
+    treatment: str = ""
+    message: str = ""
+    received_at: datetime = field(default_factory=datetime.now)
+    status: str = "신규"
+    confirmed: bool = False
+    raw: dict = field(default_factory=dict)
+
+
+# ══════════════════════════════════════════════════════════════
+# [셀레니움]  채널별 프로필을 유지하는 드라이버
+# ══════════════════════════════════════════════════════════════
+# 상주 브라우저 원격 디버깅 포트: 다른 Chrome(다른 계정)과 안 겹치게 '전용 비표준 포트' 사용.
+# 흔한 9222 를 쓰면 CS PC의 개인 Chrome(다른 네이버 계정)에 잘못 붙을 수 있어 피함.
+CHROME_DEBUG_PORT = 9764
+COLLECTOR_LOCK_PORT = 9765      # 수집기 단일 실행 보장용(실제 통신은 안 함)
+
+
+def acquire_collector_lock():
+    """수집기 중복 실행 차단.
+    성공하면 점유 소켓을 반환(프로세스가 살아있는 동안 들고 있어야 함),
+    이미 다른 수집기가 돌고 있으면 None.
+    ※ 락파일과 달리 강제 종료돼도 OS 가 포트를 회수하므로 찌꺼기가 남지 않는다."""
+    s = socket.socket()
+    try:                        # 윈도우: 남이 같은 포트를 가로채지 못하게
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    except (AttributeError, OSError):
+        pass
+    try:
+        s.bind(("127.0.0.1", COLLECTOR_LOCK_PORT))
+        s.listen(1)
+        return s
+    except OSError:             # 이미 점유됨 = 다른 수집기 실행 중
+        s.close()
+        return None
+
+
+def collector_lock_held() -> bool:
+    """다른 수집기가 이미 실행 중인지(UI 사전 확인용)."""
+    s = acquire_collector_lock()
+    if s is None:
+        return True
+    s.close()
+    return False
+
+
+def _build_chrome(opts):
+    """크롬 드라이버 인스턴스 생성.
+
+    드라이버 확보 순서:
+      1) Selenium Manager(셀레니움 4.6+ 내장) — service 없이 Chrome() 호출하면
+         설치된 크롬 버전에 맞는 드라이버를 ~/.cache/selenium 에 '버전별'로 캐시.
+         이미 있으면 재다운로드/덮어쓰기를 안 하므로 '실행 중 exe 덮어쓰기 →
+         WinError 5(액세스 거부)' 문제가 원천적으로 안 생긴다.
+      2) 실패 시 webdriver_manager 폴백. 폴백 중 PermissionError(캐시 파일 잠김)면
+         잠긴 .wdm 캐시를 지우고 1회 재시도한다.
+    """
+    from selenium import webdriver
+
+    try:                                   # 1) Selenium Manager (권장)
+        return webdriver.Chrome(options=opts)
+    except Exception as e:
+        print(f"[driver] Selenium Manager 실패({type(e).__name__}) → webdriver_manager 폴백")
+
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    try:                                   # 2) webdriver_manager
+        return webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()), options=opts)
+    except PermissionError:
+        # 잠긴/손상된 .wdm 캐시 제거 후 1회 재시도(재다운로드).
+        wdm = Path.home() / ".wdm"
+        print(f"[driver] 캐시 잠김 → {wdm} 삭제 후 재시도")
+        shutil.rmtree(wdm, ignore_errors=True)
+        return webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()), options=opts)
+
+
+def make_driver(channel_key: str, headless: bool = True,
+                debugger_address: Optional[str] = None):
+    """크롬 드라이버 생성. debugger_address 가 있으면 '이미 떠 있는 브라우저'에 연결."""
+    from selenium import webdriver
+
+    opts = webdriver.ChromeOptions()
+    if debugger_address:            # 상주 브라우저에 연결(새 창 안 띄움)
+        opts.add_experimental_option("debuggerAddress", debugger_address)
+        return _build_chrome(opts)
+
+    profile = CHROME_PROFILE_DIR / channel_key
+    profile.mkdir(parents=True, exist_ok=True)
+    opts.add_argument(f"--user-data-dir={profile}")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    if headless:
+        opts.add_argument("--headless=new")
+        opts.add_argument("--window-size=1920,1080")
+    else:
+        opts.add_argument("--start-maximized")
+    return _build_chrome(opts)
+
+
+def _port_open(host: str, port: int) -> bool:
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex((host, port)) == 0
+
+
+def _chrome_exe() -> Optional[str]:
+    cands = [r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"]
+    local = os.environ.get("LOCALAPPDATA")      # 사용자 단위 설치(다른 PC에서 흔함)
+    if local:
+        cands.append(str(Path(local) / r"Google\Chrome\Application\chrome.exe"))
+    for p in cands:
+        if Path(p).exists():
+            return p
+    return shutil.which("chrome") or shutil.which("chrome.exe")
+
+
+def ensure_persistent_chrome(port: int = CHROME_DEBUG_PORT,
+                             headless: bool = False) -> bool:
+    """
+    원격 디버깅 크롬이 안 떠 있으면 main 프로필로 '한 번' 띄운다(detached).
+    이미 떠 있으면 그대로 재사용. 성공 시 True.
+    → 이후 모든 실행(run_dashboard once/연속)이 이 브라우저에 연결됨.
+    """
+    if _port_open("127.0.0.1", port):
+        return True
+    exe = _chrome_exe()
+    if not exe:
+        print("[hub] Chrome 실행파일을 못 찾음 → 일반 방식으로 실행")
+        return False
+    profile = CHROME_PROFILE_DIR / "main"
+    profile.mkdir(parents=True, exist_ok=True)
+    # ※ --disable-blink-features=AutomationControlled 는 상단 '지원되지 않는 플래그'
+    #   경고바를 띄우므로 넣지 않음. navigator.webdriver 숨김은 start()의 CDP로 처리.
+    args = [exe, f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile}",
+            "--no-first-run", "--no-default-browser-check",
+            "--disable-session-crashed-bubble", "--hide-crash-restore-bubble"]
+    if headless:
+        args += ["--headless=new", "--window-size=1920,1080"]
+    else:
+        args.append("--start-maximized")
+    # DETACHED_PROCESS(0x8): 파이썬이 꺼져도 브라우저는 살아있게
+    subprocess.Popen(args, creationflags=0x00000008,
+                     close_fds=True)
+    for _ in range(40):             # 포트 열릴 때까지 대기(최대 ~20초)
+        if _port_open("127.0.0.1", port):
+            print(f"[hub] 상주 브라우저 최초 실행(포트 {port})")
+            return True
+        time.sleep(0.5)
+    print("[hub] 상주 브라우저 기동 대기 시간초과 → 일반 방식으로 실행")
+    return False
+
+
+def _cell_lines(el) -> List[str]:
+    """셀 텍스트를 공백 제거된 줄 리스트로."""
+    return [ln.strip() for ln in el.text.split("\n") if ln.strip()]
+
+
+def _to_sheet_date(s: str):
+    """다양한 날짜 포맷 → 시트가 날짜값으로 인식할 문자열.
+    - 날짜+시각: 'YYYY-MM-DD HH:MM' 로 통일
+    - ISO8601(+타임존): '2026-05-28T19:23:53+09:00' 도 처리
+    - 날짜만: '2026-06-20' 은 그대로(날짜값 인식)
+    못 맞추면 원문 유지."""
+    s = (s or "").strip()
+    for fmt in ("%Y.%m.%d %H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d %H:%M")
+        except (ValueError, TypeError):
+            pass
+    try:                                    # ISO8601(+09:00 등)
+        return datetime.fromisoformat(s).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        pass
+    m = re.match(                           # 한글 오전/오후: '2026. 7. 13 오후 6:38:17'
+        r"(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\s*(오전|오후)\s*(\d{1,2}):(\d{2})", s)
+    if m:
+        y, mo, d, ap, h, mi = (int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                               m.group(4), int(m.group(5)), int(m.group(6)))
+        if ap == "오후" and h != 12:
+            h += 12
+        elif ap == "오전" and h == 12:
+            h = 0
+        try:
+            return datetime(y, mo, d, h, mi).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            pass
+    try:                                    # 날짜만
+        return datetime.strptime(s, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return s
+
+
+# ══════════════════════════════════════════════════════════════
+# [브라우저 허브]  단일 브라우저 + 채널별 탭 상주 (세션 유지)
+# ══════════════════════════════════════════════════════════════
+class BrowserHub:
+    """
+    브라우저 1개를 계속 띄워두고 채널마다 탭 1개를 상주시킨다.
+    수집 때마다 해당 탭을 완전 재로드(get) → 로그인 튕기면 재로그인 → 스크랩.
+
+    안전장치:
+      1) 프로필 1개(main) 공유 — 도메인이 달라 쿠키 안 섞임
+      2) self.lock 으로 드라이버 접근 직렬화(브라우저 1개)
+      3) 탭이 닫혀도(NoSuchWindowException) 자동 재생성
+      4) set_page_load_timeout 으로 한 탭 hang 방지
+      5) maybe_recycle 로 장시간 구동 시 브라우저 재시작(메모리 정리)
+      6) collect 실패는 예외로 올려 호출부가 시트를 건드리지 않게 함
+      7) 로그인 실패(캡챠 등) 시 그 채널을 LOGIN_BACKOFF_SEC 동안 '재로그인 시도'만 건너뜀
+         → 반복 자동 로그인(계정 플래그 위험) 방지. 단, 매 사이클 로그인 상태는 확인해
+           그 사이 수동 로그인이 됐으면 백오프를 즉시 풀고 수집(화면 바로 반영)한다.
+      8) persistent=True(기본): 원격 디버깅 브라우저를 '최초 1회'만 띄우고
+         이후 실행은 그 브라우저에 연결(재사용). 앱을 껐다 켜도 로그인 유지.
+    """
+    PAGE_LOAD_TIMEOUT = 45
+    RECYCLE_AFTER_SEC = 6 * 3600
+    LOGIN_BACKOFF_SEC = 10 * 60         # 로그인 실패 후 재시도 안 하는 시간(10분)
+
+    def __init__(self, headless: bool = False, persistent: bool = True):
+        self.headless = headless
+        self.persistent = persistent    # True=상주 브라우저에 연결(최초 1회만 실행)
+        self.attached = False           # 상주 브라우저에 붙었는지(=quit 시 닫지 않음)
+        self.driver = None
+        self.tabs: Dict[str, str] = {}      # channel_key -> window handle
+        self.lock = threading.Lock()
+        self._started = 0.0
+        self._backoff: Dict[str, float] = {}   # channel_key -> 이 시각까지 건너뜀(monotonic)
+
+    def start(self) -> "BrowserHub":
+        self.attached = False
+        if self.persistent and ensure_persistent_chrome(CHROME_DEBUG_PORT, self.headless):
+            self.driver = make_driver(
+                "main", debugger_address=f"127.0.0.1:{CHROME_DEBUG_PORT}")
+            self.attached = True
+            self._prune_tabs()          # 이전 실행 잔여 탭 정리(중복 누적 방지)
+        else:
+            self.driver = make_driver("main", headless=self.headless)
+        try:
+            self.driver.set_page_load_timeout(self.PAGE_LOAD_TIMEOUT)
+        except Exception:
+            pass
+        # 봇 탐지 완화(네이버 등): navigator.webdriver 숨김
+        try:
+            self.driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {"source": "Object.defineProperty(navigator,'webdriver',"
+                           "{get:()=>undefined})"})
+        except Exception:
+            pass
+        self.tabs.clear()
+        self._started = time.monotonic()
+        return self
+
+    def _prune_tabs(self) -> None:
+        """상주 브라우저의 이전 실행 잔여 탭을 정리(1개만 남김) → 탭 중복 누적 방지."""
+        try:
+            handles = self.driver.window_handles
+            if len(handles) <= 1:
+                return
+            for h in handles[1:]:
+                try:
+                    self.driver.switch_to.window(h)
+                    self.driver.close()
+                except Exception:
+                    pass
+            self.driver.switch_to.window(self.driver.window_handles[0])
+        except Exception:
+            pass
+
+    def _accept_alert(self, wait: float = 0.0) -> None:
+        """열린 JS alert(로그인 후 이용/세션 만료 등)을 닫음.
+        wait>0 이면 그 시간만큼 '늦게 뜨는 alert'도 폴링해서 닫는다.
+        (닫지 않으면 이후 모든 명령이 차단돼 다음 채널까지 실패함)"""
+        from selenium.common.exceptions import NoAlertPresentException
+        end = time.monotonic() + wait
+        while True:
+            try:
+                self.driver.switch_to.alert.accept()   # 있으면 닫고 계속(연속 alert 대비)
+                time.sleep(0.2)
+            except NoAlertPresentException:
+                if time.monotonic() >= end:
+                    return
+                time.sleep(0.2)
+            except Exception:
+                return
+
+    def _ensure_tab(self, ch: "BaseChannel") -> None:
+        """채널 탭으로 전환. 없거나 닫혔으면 빈 창 재활용 또는 새 탭 생성."""
+        h = self.tabs.get(ch.key)
+        if h and h in self.driver.window_handles:
+            self.driver.switch_to.window(h)
+            return
+        used = set(self.tabs.values())
+        free = [w for w in self.driver.window_handles if w not in used]
+        if free:                                   # 최초 빈 창 등 재활용
+            self.driver.switch_to.window(free[0])
+        else:
+            self.driver.switch_to.new_window("tab")
+        self.tabs[ch.key] = self.driver.current_window_handle
+
+    def collect(self, ch: "BaseChannel") -> list:
+        """탭 재로드 + 로그인 보장 + 스크랩. 실패 시 예외를 올린다(시트 보호).
+
+        백오프 중이어도 페이지를 열어 로그인 상태 '확인'은 한다:
+          · 그 사이 수동 로그인이 됐으면 → 백오프 즉시 해제하고 수집(화면 바로 반영)
+          · 아직 미로그인이면 → 재로그인은 '시도하지 않고' 남은 백오프만큼 건너뜀
+            (반복 자동 로그인으로 계정이 플래그되는 것 방지)"""
+        from selenium.common.exceptions import NoSuchWindowException
+
+        with self.lock:
+            self._accept_alert()                   # 이전 채널의 잔여 alert 정리(연쇄 차단 방지)
+            try:
+                self._ensure_tab(ch)
+            except NoSuchWindowException:
+                self.tabs.pop(ch.key, None)
+                self._ensure_tab(ch)
+
+            self.driver.get(ch.LIST_URL)           # 새로고침 대신 완전 재로드
+            self._accept_alert(2.0)                # 미로그인/세션만료 등 늦게 뜨는 alert까지 대기해서 닫음
+            ch.dismiss_popups(self.driver)
+            if not ch.is_logged_in(self.driver):
+                # 백오프 중이면 재로그인은 시도하지 않고 남은 시간만큼 건너뜀
+                # (수동 로그인은 위 is_logged_in 통과로 이미 걸러졌으니 여기 안 옴)
+                until = self._backoff.get(ch.key, 0.0)
+                if until and time.monotonic() < until:
+                    mins = int((until - time.monotonic()) / 60) + 1
+                    raise RuntimeError(f"로그인 실패 백오프 중 — 약 {mins}분 후 재시도")
+
+                print(f"[{ch.name}] 세션 만료 → 재로그인")
+                try:
+                    ok = ch.login(self.driver)
+                except Exception:
+                    ok = False                     # 로그인 중 예외도 실패로 처리
+                if not ok:
+                    # 실패(캡챠/입력오류 등) → 백오프(반복 로그인 시도 차단) + 안내
+                    self._backoff[ch.key] = time.monotonic() + self.LOGIN_BACKOFF_SEC
+                    hint = f" | 수동 로그인: {ch.LOGIN_HELP}" if ch.LOGIN_HELP else ""
+                    raise RuntimeError(
+                        f"자동 로그인 실패 — {int(self.LOGIN_BACKOFF_SEC/60)}분간 건너뜀{hint}")
+                self.driver.get(ch.LIST_URL)
+                self._accept_alert(2.0)
+                ch.dismiss_popups(self.driver)
+            self._backoff.pop(ch.key, None)        # 로그인 정상(수동 포함) → 백오프 해제
+            return ch.scrape(self.driver)
+
+    def maybe_recycle(self) -> None:
+        # 상주 브라우저(attached)는 우리가 소유하지 않으니 재시작하지 않음.
+        if self.attached:
+            return
+        if self.driver and (time.monotonic() - self._started) > self.RECYCLE_AFTER_SEC:
+            print("[hub] 장시간 구동 → 브라우저 재시작(메모리 정리)")
+            self.quit()
+            self.start()
+
+    def quit(self) -> None:
+        # 상주 브라우저에 '연결'만 한 경우엔 브라우저를 닫지 않음(재사용 위해 유지).
+        if self.attached:
+            self.driver = None
+            self.tabs.clear()
+            return
+        try:
+            if self.driver:
+                self.driver.quit()
+        except Exception:
+            pass
+        self.driver = None
+        self.tabs.clear()
+
+
+# ══════════════════════════════════════════════════════════════
+# [채널]  베이스 + 자동 등록 레지스트리
+# ══════════════════════════════════════════════════════════════
+_REGISTRY: Dict[str, Type["BaseChannel"]] = {}
+
+
+def register(cls: Type["BaseChannel"]) -> Type["BaseChannel"]:
+    if not getattr(cls, "key", ""):
+        raise ValueError(f"{cls.__name__}: 'key' 가 필요합니다.")
+    _REGISTRY[cls.key] = cls
+    return cls
+
+
+class BaseChannel(ABC):
+    key: str = ""
+    name: str = ""
+    color: str = "#888888"
+    LOGIN_URL: str = ""     # 로그인 페이지
+    LIST_URL: str = ""      # 상담 목록 페이지
+    LOGIN_HELP: str = ""    # 로그인 실패 시 안내 문구(수동 로그인 방법 등)
+
+    # ── 팝업 닫기 ─────────────────────────────────────────────
+    # ⚠️ 페이지 본문은 절대 클릭하지 않는다. '진짜 오버레이(모달/알림/드로어)'가
+    #    떠 있을 때만, 그 오버레이 컨테이너 '내부'의 닫기(X) 버튼만 클릭한다.
+    #    (예전엔 '확인'/'닫기' 텍스트를 페이지 전역에서 클릭해 표의 '확인' 칩까지
+    #     눌러버리는 사고가 있었음 → 텍스트 전역 클릭 제거)
+    POPUP_ROOT_SELECTORS = [
+        ".ant-modal-wrap", ".ant-modal-root",
+        ".ant-notification", ".ant-drawer",
+        ".MuiDialog-root", ".MuiModal-root",
+        "[role='dialog']", "[role='alertdialog']",
+    ]
+    # 오버레이 '내부'에서만 찾는 닫기 버튼
+    POPUP_CLOSE_SELECTORS = [
+        ".ant-modal-close", ".ant-modal-close-x",
+        ".ant-notification-notice-close", ".ant-drawer-close",
+        "button[aria-label='Close']", "[aria-label='close']", "[aria-label='닫기']",
+    ]
+    # 오버레이 '내부'에서만 찾는 텍스트 닫기(공지/광고 전용, 본문엔 없는 문구)
+    POPUP_CLOSE_TEXTS = [
+        "오늘 하루 보지 않기", "오늘 하루 그만보기", "다시 보지 않기", "그만 보기",
+    ]
+    EXTRA_POPUP_SELECTORS: List[str] = []
+
+    def __init__(self, credentials: Optional[dict] = None):
+        self.credentials = credentials or {}
+        # 시트 1행에 추가로 쓸 셀(예: 잔액) {"E1": "...", "F1": "..."}. scrape 중 채움.
+        self.header_cells: Dict[str, str] = {}
+
+    # 외부 진입점: 데모면 가짜, 아니면 셀레니움 수집
+    def collect(self) -> List[Consultation]:
+        if DEMO_MODE:
+            return _generate_demo(self)
+        driver = make_driver(self.key, headless=HEADLESS)
+        try:
+            self.dismiss_popups(driver)
+            if not self.is_logged_in(driver):
+                print(f"[{self.name}] 세션 없음 — 자동 로그인 시도")
+                if not self.login(driver):
+                    print(f"[{self.name}] 자동 로그인 미지원/실패 — 건너뜀")
+                    return []
+                print(f"[{self.name}] 자동 로그인 성공")
+            self.dismiss_popups(driver)
+            return self._scrape(driver)
+        finally:
+            driver.quit()
+
+    def is_logged_in(self, driver) -> bool:
+        """로그인 상태 확인. 채널마다 override (기본 True)."""
+        return True
+
+    def login(self, driver) -> bool:
+        """저장된 계정으로 자동 로그인. 구현한 채널만 True 반환(미구현=수동 필요)."""
+        return False
+
+    def dismiss_popups(self, driver) -> None:
+        """
+        떠 있는 '오버레이(모달/알림/드로어)' 가 있을 때만, 그 컨테이너 내부의
+        닫기(X) 버튼만 클릭한다. 오버레이가 없으면 아무것도 하지 않는다.
+        → 페이지 본문/표 요소는 절대 클릭하지 않는다(읽기 전용 스크랩 보장).
+        """
+        from selenium.webdriver.common.by import By
+
+        close_sels = self.POPUP_CLOSE_SELECTORS + self.EXTRA_POPUP_SELECTORS
+        for _ in range(2):                       # 겹친 오버레이 대비 2회
+            # 1) 실제로 떠 있는 오버레이 컨테이너만 수집
+            roots = []
+            for rsel in self.POPUP_ROOT_SELECTORS:
+                try:
+                    roots += [r for r in driver.find_elements(By.CSS_SELECTOR, rsel)
+                              if r.is_displayed()]
+                except Exception:
+                    pass
+            if not roots:
+                return                           # 오버레이 없음 → 클릭 안 함
+
+            clicked = False
+            for root in roots:
+                for sel in close_sels:           # 오버레이 '내부' 닫기 버튼만
+                    try:
+                        for el in root.find_elements(By.CSS_SELECTOR, sel):
+                            if el.is_displayed():
+                                try:
+                                    el.click()
+                                except Exception:
+                                    driver.execute_script("arguments[0].click();", el)
+                                clicked = True
+                    except Exception:
+                        pass
+                for txt in self.POPUP_CLOSE_TEXTS:   # 오버레이 '내부' 텍스트만
+                    try:
+                        for el in root.find_elements(
+                                By.XPATH, f".//*[normalize-space()='{txt}']"):
+                            if el.is_displayed():
+                                el.click()
+                                clicked = True
+                    except Exception:
+                        pass
+            if not clicked:
+                return
+
+    @abstractmethod
+    def _scrape(self, driver) -> List[Consultation]:
+        """LIST_URL 을 열어 상담 목록을 긁어 Consultation 리스트로 반환."""
+        raise NotImplementedError
+
+    # BrowserHub 진입점: 현재 탭에서 스크랩. 기본은 레거시 _scrape 위임.
+    # 대시보드 채널은 dict 리스트를 반환하도록 override.
+    def scrape(self, driver) -> list:
+        return self._scrape(driver)
+
+    # 시트 기록용(override): 스크랩 dict → 시트 행(list), 기록 후 서식 처리
+    SHEET_TAB: str = ""
+    SHEET_START: str = "A1"
+    SHEET_CLEAR: str = ""
+
+    def to_sheet_rows(self, items: list) -> list:
+        return []
+
+    def after_write(self, ws) -> None:
+        pass
+
+    # 대시보드 통합용: 각 미확인 건 → [이름, 내용, 시각, 연락처] (override)
+    def dashboard_rows(self, items: list) -> list:
+        return []
+
+    def make_id(self, external_id: str) -> str:
+        return f"{self.key}:{external_id}"
+
+
+# ── 채널 정의 (URL/선택자는 실제 사이트에 맞게 채우기) ────────
+@register
+class BabitalkChannel(BaseChannel):
+    key, name, color = "babitalk", "바비톡", "#FF6B9D"
+    LOGIN_URL = "https://client.babitalk.com/login"
+    LIST_URL = "https://client.babitalk.com/ask"
+    USER_ID, USER_PW = account("babitalk")
+
+    # 시트 매핑: /ask 테이블 td#0~#15 → '바비톡' 탭 B~Q (헤더 순서 동일)
+    #   B CS현황 C 고객정보 D 연락처 E 이벤트명/의사명 F 유입경로 G 플랫폼종류
+    #   H EID I 상담요청시각 J 부위/시술 K 고객코멘트 L 문자발송 M 상담신청단가
+    #   N 소진 O CS메모 P 신청일시(날짜서식) Q 비고
+    SHEET_TAB = "바비톡"
+    SHEET_START = "B3"
+    SHEET_CLEAR = "B3:Q1000"
+    N_COLS = 16                      # B~Q
+    MIN_COLS = 14                    # 이보다 적으면 데이터행 아님(그룹행/빈행) → 스킵
+    NAME_COL = 1                     # cols 내 '고객정보' 인덱스. 셀 첫 줄=국적(국기 라벨)
+    DATE_COL = 14                    # cols 내 '신청일시' 인덱스(→ 시트 P열)
+    CSMEMO_COL = 13                  # cols 내 'CS메모' 인덱스(→ 시트 O열)
+    NOISE = {"arrow_right"}          # material-symbols 아이콘 글자 제거
+
+    def is_logged_in(self, driver) -> bool:
+        """현재 탭 기준 판별(네비게이션은 Hub가 수행). SPA 정착까지 대기."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        try:
+            WebDriverWait(driver, 12).until(lambda d:
+                "/login" in d.current_url
+                or d.find_elements(By.CSS_SELECTOR, "input[placeholder='ID']")
+                or d.find_elements(By.CSS_SELECTOR, "tbody.MuiTableBody-root tr"))
+        except Exception:
+            pass
+        return ("/login" not in driver.current_url
+                and not driver.find_elements(By.CSS_SELECTOR, "input[placeholder='ID']"))
+
+    @staticmethod
+    def _react_fill(driver, el, value):
+        """React 컨트롤드 인풋에 값 주입(send_keys가 값 등록 안 되는 폼 대응).
+        네이티브 value setter로 값 설정 + input/change 이벤트 발생 → React 상태 반영."""
+        el.click()
+        driver.execute_script(
+            "var d=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');"
+            "d.set.call(arguments[0], arguments[1]);"
+            "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
+            "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));",
+            el, value)
+
+    def login(self, driver) -> bool:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        driver.get(self.LOGIN_URL)
+        wait = WebDriverWait(driver, 20)
+
+        id_input = wait.until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "input.form-control[placeholder='ID']")))
+        self._react_fill(driver, id_input, self.USER_ID)
+        time.sleep(1)
+        pw = driver.find_element(
+            By.CSS_SELECTOR, "input.form-control[type='password']")
+        self._react_fill(driver, pw, self.USER_PW)
+        time.sleep(0.5)
+        # 값이 실제로 들어갔는지 확인(안 들어가면 send_keys 폴백)
+        if not (id_input.get_attribute("value") and pw.get_attribute("value")):
+            id_input.clear(); id_input.send_keys(self.USER_ID)
+            pw.clear(); pw.send_keys(self.USER_PW)
+        time.sleep(0.5)
+
+        btn = driver.find_element(
+            By.XPATH, "//button[@type='submit'][contains(.,'로그인')]")
+        btn.click()
+        wait.until(lambda d: "/login" not in d.current_url)
+        return "/login" not in driver.current_url
+
+    @staticmethod
+    def _memo_text(driver, td) -> str:
+        """CS메모 셀에서 아이콘('+' add 등)만 뺀 '실제 메모 텍스트'를 반환.
+        미작성(신규) 셀은 add 아이콘만 있어 ''(빈값)이 된다 → 이게 신규 판정 기준.
+
+        ⚠️ 실제 DOM: 메모 텍스트도 '<button>' 안(<div>)에 들어있다.
+           · 빈 셀:  <button><span class=material-symbols-rounded>add</span>…</button>
+           · 메모有: <button><div>실제 메모…</div><span class=MuiTouchRipple/></button>
+           예전엔 button 을 통째로 제거해서 메모 텍스트까지 날아가 '전부 신규'로
+           오분류됐다. → button 은 남기고 '아이콘 span·ripple'만 제거한다."""
+        try:
+            txt = driver.execute_script(
+                "var c=arguments[0].cloneNode(true);"
+                "c.querySelectorAll('svg,[class*=material-symbols],"
+                "[class*=material-icons],[class*=MuiTouchRipple],i')"
+                ".forEach(function(e){e.remove();});"
+                "return (c.textContent||'').trim();", td)
+        except Exception:
+            txt = td.get_attribute("textContent") or ""
+        # 아이콘 잔여 리거처 토큰('add','+' 등) 제거 후 남는 순수 텍스트만
+        return " ".join(t for t in (txt or "").split()
+                        if t not in ("add", "+", "arrow_right", "note_add", "edit"))
+
+    def scrape(self, driver) -> List[dict]:
+        """/ask 테이블에서 CS메모(O열) 비어있는 신규(=CS 미확인)만 B~Q로 추출. 실패 시 예외."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "tbody.MuiTableBody-root tr")))
+        time.sleep(1.2)
+
+        rows = driver.find_elements(By.CSS_SELECTOR, "tbody.MuiTableBody-root tr")
+        out = []
+        for row in rows:
+            tds = row.find_elements(By.TAG_NAME, "td")
+            if len(tds) < self.MIN_COLS:        # 데이터 행이 아니면(빈행/그룹행) 스킵
+                continue
+            cols = []
+            for i in range(self.N_COLS):        # 셀이 모자라도 빈칸으로 안전 처리
+                if i < len(tds):
+                    lines = _cell_lines(tds[i])         # .text(보이는 텍스트)
+                    if not lines:                       # 숨겨져 비면 textContent 폴백
+                        tc = (tds[i].get_attribute("textContent") or "").strip()
+                        if tc:
+                            lines = [tc]
+                    lines = [l for l in lines if l not in self.NOISE]
+                    # 고객정보 셀은 [국적, 이름] 두 줄(국기 라벨 '대한민국' 등이 첫 줄).
+                    # 첫 줄(국적)을 떼고 이름만 남긴다 — 국적이 무엇이든(외국인 포함) 동작.
+                    if i == self.NAME_COL and len(lines) >= 2:
+                        lines = lines[1:]
+                    cols.append(" ".join(lines))
+                else:
+                    cols.append("")
+            # 실데이터 아닌 빈 행(고객정보·이벤트명 둘 다 없음) → 스킵
+            if not cols[1].strip() and not cols[3].strip():
+                continue
+            # CS메모칸: 미작성(신규)이면 '+' 버튼만 있으므로, 버튼/아이콘을 뺀
+            # '실제 메모 텍스트'로 다시 채워 판정·기록한다(시트 O열도 깨끗해짐).
+            if self.CSMEMO_COL < len(tds):
+                cols[self.CSMEMO_COL] = self._memo_text(driver, tds[self.CSMEMO_COL])
+            # 신규 = CS메모 비어있음(=CS 미확인). 실제 메모 있으면 제외.
+            if cols[self.CSMEMO_COL].strip():
+                continue
+            out.append({"cols": cols})
+
+        # 충전잔액(E1) — money-box-container(고정 클래스)의 '원' 금액.
+        # ※ 사이드바가 접혀 화면에 안 보이면 .text 가 빈 값이라, textContent(숨김 여부
+        #   무관)로 읽고 정규식으로 금액 추출. 못 잡으면 이전 값 유지(빈 값으로 안 덮음).
+        try:
+            from selenium.webdriver.support.ui import WebDriverWait
+            def _bal(d):
+                for b in d.find_elements(By.CSS_SELECTOR, "[class*='money-box-container']"):
+                    t = b.get_attribute("textContent") or ""
+                    m = re.search(r"[\d][\d,]*\s*원", t)
+                    if m:
+                        return m.group(0).strip()
+                return None
+            v = WebDriverWait(driver, 8).until(_bal)
+            if v:
+                self.header_cells["E1"] = v
+        except Exception:
+            pass
+        return out
+
+    def to_sheet_rows(self, items: list) -> list:
+        rows = []
+        for it in items:
+            c = list(it["cols"])
+            c[self.DATE_COL] = _to_sheet_date(c[self.DATE_COL])   # 신청일시 → 날짜값
+            rows.append(c)
+        return rows
+
+    def dashboard_rows(self, items: list) -> list:
+        # [이름=고객정보, 내용=이벤트명, 시각=신청일시, 연락처]
+        return [[it["cols"][1], it["cols"][3],
+                 _to_sheet_date(it["cols"][14]), it["cols"][2]] for it in items]
+
+    def after_write(self, ws) -> None:
+        # 헤더 마지막에 신청일시/비고 추가 + P열(신청일시) 날짜 표시서식
+        ws.update(values=[["신청일시", "비고"]], range_name="P2")
+        ws.format("P3:P1000", {"numberFormat": {"type": "DATE_TIME",
+                                                "pattern": "yyyy-mm-dd hh:mm"}})
+
+    def _scrape(self, driver):
+        return []
+
+
+@register
+class GangnamUnniChannel(BaseChannel):
+    key, name, color = "gangnamunni", "강남언니", "#00B5A0"
+    LOGIN_URL = "https://partner.gangnamunni.com/login"
+    LIST_URL = "https://partner.gangnamunni.com/consultation"
+    USER_ID, USER_PW = account("gangnamunni")
+
+    # 시트 매핑 (강남언니 탭: B신청일시 C고객정보 D연락처 E상담경로
+    #            F결제상담상태 G시술일정 H집도의 I메모 J문자)
+    SHEET_TAB = "강남언니"
+    SHEET_START = "B3"
+    SHEET_CLEAR = "B3:K1000"
+    TARGET_STATUS = "신규상담"
+    NOISE = {"채팅창으로 이동", "내원일 입력", "시술일 입력",
+             "내원예약취소", "시술예정", "내원예약"}
+
+    def is_logged_in(self, driver) -> bool:
+        """현재 탭 기준 판별(네비게이션은 Hub가 이미 함). SPA 정착까지 대기."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        try:
+            WebDriverWait(driver, 12).until(lambda d:
+                "/login" in d.current_url
+                or d.find_elements(By.ID, "loginId")
+                or d.find_elements(
+                    By.CSS_SELECTOR, "tbody.ant-table-tbody tr.ant-table-row"))
+        except Exception:
+            pass
+        return ("/login" not in driver.current_url
+                and not driver.find_elements(By.ID, "loginId"))
+
+    def login(self, driver) -> bool:
+        """검증된 로그인 흐름 (login_gangnamunni.py 에서 확인 완료)."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+        import time
+
+        driver.get(self.LOGIN_URL)
+        wait = WebDriverWait(driver, 20)
+
+        id_input = wait.until(EC.presence_of_element_located((By.ID, "loginId")))
+        pw_input = driver.find_element(By.ID, "loginPw")
+
+        id_input.click(); id_input.clear(); id_input.send_keys(self.USER_ID)
+        time.sleep(2)
+        pw_input.click(); pw_input.clear(); pw_input.send_keys(self.USER_PW)
+        time.sleep(1)
+
+        # emotion 해시 클래스가 전역이라 폼 행 div가 아닌 '로그인' 텍스트 submit 버튼을 클릭.
+        btn = driver.find_element(
+            By.XPATH, "//button[@type='submit'][.//span[text()='로그인']]")
+        try:
+            WebDriverWait(driver, 10).until(lambda d: btn.is_enabled())
+        except Exception:
+            pass
+        btn.click()
+        wait.until(lambda d: "/login" not in d.current_url)
+        return "/login" not in driver.current_url
+
+    def _set_page_size(self, driver, size: str = "100") -> None:
+        """페이지당 표시 개수를 size로 변경(기본 10 → 100). ant-dropdown-trigger 사용.
+        실패해도 기본 개수로 진행(예외 안 냄)."""
+        from selenium.webdriver.common.by import By
+        try:
+            trigger = None
+            for b in driver.find_elements(By.CSS_SELECTOR, "button.ant-dropdown-trigger"):
+                if b.is_displayed() and b.text.strip() in ("10", "25", "50", "100"):
+                    trigger = b
+                    break
+            if not trigger or trigger.text.strip() == size:
+                return
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'})", trigger)
+            trigger.click()
+            time.sleep(1)
+            for i in driver.find_elements(By.CSS_SELECTOR, ".ant-dropdown-menu-item"):
+                if i.is_displayed() and i.text.strip() == size:
+                    driver.execute_script("arguments[0].click();", i)
+                    break
+            time.sleep(2)      # 재조회 대기
+        except Exception:
+            pass
+
+    def scrape(self, driver) -> List[dict]:
+        """/consultation 테이블에서 '메모'(td#8)가 비어있는 신규(=CS 미확인)만. 실패 시 예외."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        # 목록 로딩 대기 — 못 뜨면 예외가 올라가 Hub→러너가 시트를 건드리지 않음
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "tbody.ant-table-tbody tr.ant-table-row")))
+        # 기본 10건만 봄(100건은 느려서 되돌림). 새 상담은 최신순 맨 위에 떠서 잡힘.
+        # 필요시 self._set_page_size(driver, "100") 로 확대 가능.
+        time.sleep(1.2)
+
+        rows = driver.find_elements(
+            By.CSS_SELECTOR,
+            "tbody.ant-table-tbody tr.ant-table-row.ant-table-row-level-0")
+        out = []
+        for row in rows:
+            tds = row.find_elements(By.TAG_NAME, "td")
+            if len(tds) < 9:                     # 메모(td#8)까지 필요
+                continue
+            # 신규 = 메모칸에 '메모하기' 버튼만 있는(=아직 메모 안 쓴) 상태.
+            #   메모가 있으면 그 텍스트가 뜨고, 없으면 '메모하기' 버튼만 뜸.
+            memo = " ".join(l for l in _cell_lines(tds[8]) if l != "메모하기")
+            if memo.strip():                     # 실제 메모 텍스트가 있으면 → 제외
+                continue
+            status = (_cell_lines(tds[4]) or [""])[0]     # 상태 = td#4 첫 줄
+
+            applied = " ".join(_cell_lines(tds[0]))
+            try:
+                name = row.find_element(
+                    By.CSS_SELECTOR,
+                    "[data-testid='consultation-txt-name']").text.strip()
+            except Exception:
+                name = ""
+            info = _cell_lines(tds[1])
+            birth = info[-1] if info else ""              # 예: '여 / 2007'
+            customer = f"{name} ({birth})" if name else birth
+            contact = (_cell_lines(tds[2]) or [""])[0]
+            route = " / ".join(l for l in _cell_lines(tds[3]) if l not in self.NOISE)
+            sisul = " ".join(l for l in _cell_lines(tds[6]) if l not in self.NOISE) \
+                if len(tds) > 6 else ""
+            doctor = " ".join(_cell_lines(tds[7])) if len(tds) > 7 else ""
+            sms = " ".join(_cell_lines(tds[9])) if len(tds) > 9 else ""
+
+            out.append({"applied": applied, "customer": customer,
+                        "contact": contact, "route": route, "status": status,
+                        "sisul": sisul, "doctor": doctor, "memo": memo, "sms": sms,
+                        "row_key": row.get_attribute("data-row-key")})
+
+        # 충전잔액(E1) + 노출 잔여기간(F1) — css 해시 대신 안정 클래스로.
+        # .text(보이는 텍스트)가 비면 textContent(숨김 무관)로 폴백. 못 잡으면 이전 값 유지.
+        def _txt(el):
+            return (el.text or el.get_attribute("textContent") or "").strip()
+        try:
+            v = _txt(driver.find_element(
+                By.CSS_SELECTOR,
+                "span.ant-typography-ellipsis-single-line.flex-1.text-left"))
+            if v:
+                self.header_cells["E1"] = v
+        except Exception:
+            pass
+        try:
+            v = _txt(driver.find_element(
+                By.XPATH, "//span[contains(@class,'ant-typography') "
+                          "and contains(@class,'!text-white')]"))
+            if v:
+                self.header_cells["F1"] = v
+        except Exception:
+            pass
+        return out
+
+    def to_sheet_rows(self, items: list) -> list:
+        return [[_to_sheet_date(it["applied"]), it["customer"], it["contact"],
+                 it["route"], it["status"], it["sisul"], it["doctor"],
+                 it["memo"], it["sms"]] for it in items]
+
+    def dashboard_rows(self, items: list) -> list:
+        # [이름=고객정보, 내용=상담경로, 시각=신청일시, 연락처]
+        return [[it["customer"], it["route"],
+                 _to_sheet_date(it["applied"]), it["contact"]] for it in items]
+
+    def after_write(self, ws) -> None:
+        # B열(신청일시) 날짜 표시서식
+        ws.format(f"{self.SHEET_START}:B1000",
+                  {"numberFormat": {"type": "DATE_TIME",
+                                    "pattern": "yyyy.mm.dd hh:mm"}})
+
+    def _scrape(self, driver):
+        return []
+
+
+@register
+class NaverMapChannel(BaseChannel):
+    key, name, color = "naver_map", "네이버지도", "#03C75A"
+    LOGIN_URL = "https://new.smartplace.naver.com/"
+    BOOKING_BIZ_ID = "762603"
+    # 예약 API를 같은 오리진에서 fetch 하려고 LIST_URL 을 예약목록 페이지로 둠
+    LIST_URL = (f"https://partner.booking.naver.com/bizes/{BOOKING_BIZ_ID}"
+                "/booking-list-view")
+    USER_ID, USER_PW = account("naver_map")
+    CAPTCHA_WAIT = 150      # 캡챠/추가인증이 뜨면 사람이 풀 수 있게 대기(초)
+    LOGIN_HELP = "python naver_login.py 실행 후 캡챠 직접 풀기"
+
+    # 시트 매핑 (네이버지도 탭: B신청일시 C고객명 D연락처 E예약일 F시술/상품
+    #            G유입경로 H예약번호). 필터 = CS메모(ownerCommentBody) 비어있는 신규만.
+    SHEET_TAB = "네이버지도"
+    SHEET_START = "B3"
+    SHEET_CLEAR = "B3:K1000"
+    SHEET_HEADERS = ["No", "신청일시", "고객명", "연락처", "예약일",
+                     "시술/상품", "유입경로", "예약번호"]   # A~H
+    WINDOW_DAYS = 90        # 신청일(REGDATE) 조회 범위: 오늘 기준 과거 N일
+
+    def is_logged_in(self, driver) -> bool:
+        """
+        미로그인 판별: nid로 튕기거나 #id 폼이 보이거나 헤더에 '로그인' 버튼이 보이면 False.
+        (place 페이지는 공개라 URL만으론 판별 불가 → 헤더 로그인버튼으로 판별)
+        """
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        if "nid.naver.com" in driver.current_url:
+            return False
+        try:                                   # 헤더 렌더까지 대기
+            WebDriverWait(driver, 8).until(lambda d:
+                d.find_elements(By.CSS_SELECTOR, "[class*='Header_account']")
+                or d.find_elements(By.ID, "id"))
+        except Exception:
+            pass
+        if driver.find_elements(By.ID, "id"):
+            return False
+        login_btns = driver.find_elements(
+            By.XPATH, "//a[normalize-space()='로그인']|//button[normalize-space()='로그인']")
+        return not any(b.is_displayed() for b in login_btns)
+
+    def _paste(self, driver, el, text):
+        """네이버 봇 탐지 완화: 클립보드 붙여넣기(빠른 send_keys보다 덜 걸림)."""
+        from selenium.webdriver.common.keys import Keys
+        el.click(); el.clear()
+        try:
+            import pyperclip
+            pyperclip.copy(text)
+            el.send_keys(Keys.CONTROL, "v")
+        except Exception:
+            el.send_keys(text)
+
+    def login(self, driver) -> bool:
+        """
+        홈의 '로그인' 클릭 → nid 폼에 계정 붙여넣기 → 로그인상태유지 ON → submit.
+        캡챠/추가인증이 뜨면 headed 창에서 사람이 풀 시간을 CAPTCHA_WAIT 만큼 준다.
+        (무인 실행 중 캡챠가 뜨면 시간초과로 False → 세션 유지로 재로그인 자체를 최소화)
+        """
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        driver.get(self.LOGIN_URL)
+        wait = WebDriverWait(driver, 20)
+        # 오른쪽 상단 '로그인' 클릭 → nid 로그인 페이지
+        try:
+            wait.until(EC.element_to_be_clickable(
+                (By.XPATH, "//a[normalize-space()='로그인']"))).click()
+        except Exception:
+            driver.get("https://nid.naver.com/nidlogin.login")
+
+        id_in = wait.until(EC.presence_of_element_located((By.ID, "id")))
+        self._paste(driver, id_in, self.USER_ID)
+        time.sleep(2)
+        pw_in = driver.find_element(By.ID, "pw")
+        self._paste(driver, pw_in, self.USER_PW)
+        time.sleep(1)
+
+        # 로그인 상태 유지 ON (실제 체크박스 #nvlong, 클릭 프록시 div#keep)
+        try:
+            nvlong = driver.find_element(By.ID, "nvlong")
+            if not nvlong.is_selected():
+                driver.find_element(By.ID, "keep").click()
+        except Exception:
+            pass
+
+        driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
+
+        # 성공(=nid 벗어남)까지 대기 — 캡챠 뜨면 그 사이 사람이 해결
+        try:
+            WebDriverWait(driver, self.CAPTCHA_WAIT).until(
+                lambda d: "nid.naver.com" not in d.current_url)
+        except Exception:
+            print(f"[{self.name}] 로그인 미완료(캡챠/추가인증 가능) — 수동 로그인 필요")
+            return False
+        return "nid.naver.com" not in driver.current_url
+
+    @staticmethod
+    def _fmt_phone(p: str) -> str:
+        d = "".join(ch for ch in (p or "") if ch.isdigit())
+        if len(d) == 11:
+            return f"{d[:3]}-{d[3:7]}-{d[7:]}"
+        if len(d) == 10:
+            return f"{d[:3]}-{d[3:6]}-{d[6:]}"
+        return p or ""
+
+    def scrape(self, driver) -> List[dict]:
+        """
+        네이버 예약 목록 API를 로그인 세션으로 호출 → CS메모(ownerCommentBody)가
+        비어있는(=CS 미확인 신규) 예약만 반환. HTML 스크랩이 아니라 JSON API 사용.
+        (BrowserHub 가 LIST_URL=예약목록 페이지를 이미 열어둬서 same-origin fetch 가능)
+        """
+        import json
+        # 신청일(REGDATE) 기준 최근 N일 조회 → '신규 유입' 정확도↑.
+        # 신청일은 미래가 없으므로 끝날짜=내일(오늘 신청분 tz 안전 포함).
+        start = (datetime.now() - timedelta(days=self.WINDOW_DAYS)
+                 ).strftime("%Y-%m-%dT00:00:00.000Z")
+        end = (datetime.now() + timedelta(days=1)
+               ).strftime("%Y-%m-%dT00:00:00.000Z")
+        api = (f"https://partner.booking.naver.com/api/businesses/"
+               f"{self.BOOKING_BIZ_ID}/bookings?bizItemTypes=STANDARD"
+               f"&bookingStatusCodes=&dateFilter=REGDATE"
+               f"&startDateTime={start}&endDateTime={end}&page=0&size=300")
+
+        driver.set_script_timeout(30)
+        txt = driver.execute_async_script("""
+            const cb = arguments[arguments.length - 1];
+            fetch(arguments[0], {credentials: 'include'})
+              .then(r => r.text()).then(t => cb(t)).catch(e => cb('ERR:' + e));
+        """, api)
+        data = json.loads(txt)                 # 형식 오류/미로그인 응답이면 예외 → 시트 보호
+        if not isinstance(data, list):
+            raise RuntimeError(f"예약 API 응답이 목록이 아님: {str(data)[:120]}")
+
+        out = []
+        for r in data:
+            if (r.get("ownerCommentBody") or "").strip():   # CS메모 있으면 = 확인함 → 제외
+                continue
+            if r.get("cancelledDateTime"):                  # 취소된 예약 → 제외
+                continue
+            out.append({
+                "reg": r.get("regDateTime", ""),
+                "name": r.get("name", ""),
+                "phone": self._fmt_phone(r.get("phone", "")),
+                "useDate": r.get("startDate", ""),
+                "item": r.get("bizItemName", "") or r.get("serviceName", ""),
+                "area": r.get("areaName", ""),
+                "bookingId": r.get("bookingId", ""),
+            })
+        out.sort(key=lambda x: x["reg"], reverse=True)      # 신청 최신순
+        return out
+
+    def to_sheet_rows(self, items: list) -> list:
+        return [[_to_sheet_date(it["reg"]), it["name"], it["phone"],
+                 _to_sheet_date(it["useDate"]), it["item"], it["area"],
+                 str(it["bookingId"])] for it in items]
+
+    def dashboard_rows(self, items: list) -> list:
+        # [이름, 내용=시술/상품, 시각=신청일시, 연락처]
+        return [[it["name"], it["item"], _to_sheet_date(it["reg"]), it["phone"]]
+                for it in items]
+
+    def after_write(self, ws) -> None:
+        # A열은 사용자 수식이므로 건드리지 않음 → 헤더도 B2부터만.
+        # + 날짜서식(B 신청일시=날짜+시각, E 예약일=날짜)
+        ws.update(values=[self.SHEET_HEADERS[1:]], range_name="B2")
+        ws.format("B3:B1000", {"numberFormat": {"type": "DATE_TIME",
+                                                "pattern": "yyyy-mm-dd hh:mm"}})
+        ws.format("E3:E1000", {"numberFormat": {"type": "DATE",
+                                                "pattern": "yyyy-mm-dd"}})
+
+    def _scrape(self, driver):
+        return []
+
+
+@register
+class YeosinTicketChannel(BaseChannel):
+    key, name, color = "yeosin_ticket", "여신티켓", "#FF4757"
+    LOGIN_URL = ""   # TODO: 여신티켓 제휴점 관리자 URL
+    LIST_URL = ""    # TODO
+
+    def _scrape(self, driver):
+        return []
+
+
+class ByulstarBase(BaseChannel):
+    """byulstar 자사 관리자 공통 로그인(온라인상담/온라인예약 공유). LIST_URL·scrape는 하위에서."""
+    LOGIN_URL = "https://www.byulstar.com/manager/login.php"
+    USER_ID, USER_PW = account("byulstar")
+
+    def is_logged_in(self, driver) -> bool:
+        # 미로그인 시 '로그인 후 이용' alert → 닫고 login.php 로 튕김
+        from selenium.common.exceptions import NoAlertPresentException
+        try:
+            driver.switch_to.alert.accept()
+            return False                       # alert = 미로그인
+        except NoAlertPresentException:
+            pass
+        except Exception:
+            pass
+        return "login" not in driver.current_url.lower()
+
+    def login(self, driver) -> bool:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        driver.get(self.LOGIN_URL)
+        wait = WebDriverWait(driver, 15)
+        mid = wait.until(EC.presence_of_element_located((By.ID, "mId")))
+        mid.clear(); mid.send_keys(self.USER_ID)
+        time.sleep(1)
+        pw = driver.find_element(By.ID, "mPw")
+        pw.clear(); pw.send_keys(self.USER_PW)
+        time.sleep(0.5)
+        # 자동로그인 체크(세션 유지)
+        try:
+            chk = driver.find_element(By.CSS_SELECTOR, "input[name='autologin']")
+            if not chk.is_selected():
+                chk.click()
+        except Exception:
+            pass
+        driver.find_element(By.CSS_SELECTOR, "input[value='LOGIN']").click()
+        wait.until(lambda d: "login" not in d.current_url.lower())
+        return "login" not in driver.current_url.lower()
+
+    @staticmethod
+    def select_value(row) -> str:
+        """행 안의 첫 select 선택값 반환(확인유무/신규구분 등 상태 드롭다운)."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import Select
+        try:
+            s = row.find_elements(By.TAG_NAME, "select")
+            if s:
+                return Select(s[0]).first_selected_option.text.strip()
+        except Exception:
+            pass
+        return ""
+
+
+@register
+class OnlineConsultChannel(ByulstarBase):
+    key, name, color = "online_consult", "온라인상담", "#1E90FF"
+    LIST_URL = "https://www.byulstar.com/manager/main/counsel/counsel_list.php"
+
+    # 시트 매핑: counsel_list td#0~#10 → '온라인상담' 탭 B~L (헤더 순서 동일)
+    #   B번호 C답변여부 D신규구분 E상담분야 F제목 G작성자 H연락가능한시간
+    #   I등록일 J답변일 K선택삭제 L ip
+    # 필터: 신규구분(td.newbi select)의 선택값이 '미분류'인 행만(=CS 미분류/미확인).
+    SHEET_TAB = "온라인상담"
+    SHEET_START = "B3"
+    SHEET_CLEAR = "B3:L1000"
+    TARGET_NEWBI = "미분류"
+
+    @staticmethod
+    def _newbi_value(driver, row) -> str:
+        """행의 신규구분 select 선택값(미분류/신규/불량 등) 반환."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import Select
+        try:
+            for s in row.find_elements(By.CSS_SELECTOR, "td.newbi select, select"):
+                if s.tag_name == "select":
+                    return Select(s).first_selected_option.text.strip()
+        except Exception:
+            pass
+        try:                                   # JS 폴백
+            return driver.execute_script(
+                "var s=arguments[0].querySelector('select');"
+                "return s?s.options[s.selectedIndex].text.trim():'';", row) or ""
+        except Exception:
+            return ""
+
+    def scrape(self, driver) -> List[dict]:
+        """counsel_list 에서 신규구분이 '미분류'인 행만 B~L로 추출. 실패 시 예외(시트 보호)."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "#AllCheckFrm > table > tbody > tr")))
+        time.sleep(1)
+
+        rows = driver.find_elements(By.CSS_SELECTOR, "#AllCheckFrm > table > tbody > tr")
+        out = []
+        for row in rows:
+            tds = row.find_elements(By.TAG_NAME, "td")
+            if len(tds) < 11:
+                continue
+            newbi = self._newbi_value(driver, row)
+            if newbi != self.TARGET_NEWBI:          # '미분류' 아닌 행 제외
+                continue
+            out.append({
+                "no": tds[0].text.strip(),
+                "answered": tds[1].text.strip(),
+                "newbi": newbi,
+                "field": tds[3].text.strip(),
+                "title": " ".join(_cell_lines(tds[4])),
+                "writer": tds[5].text.strip(),
+                "contact_time": tds[6].text.strip(),
+                "reg": tds[7].text.strip(),
+                "ans": tds[8].text.strip(),
+                "del": tds[9].text.strip(),
+                "ip": tds[10].text.strip(),
+            })
+        return out
+
+    def to_sheet_rows(self, items: list) -> list:
+        return [[it["no"], it["answered"], it["newbi"], it["field"], it["title"],
+                 it["writer"], it["contact_time"], _to_sheet_date(it["reg"]),
+                 _to_sheet_date(it["ans"]), it["del"], it["ip"]] for it in items]
+
+    def dashboard_rows(self, items: list) -> list:
+        # [이름=작성자, 내용=제목, 시각=등록일, 연락처=제목에서 추출]
+        out = []
+        for it in items:
+            m = re.search(r"01[016789][-\s]?\d{3,4}[-\s]?\d{4}", it["title"])
+            out.append([it["writer"], it["title"], _to_sheet_date(it["reg"]),
+                        m.group(0) if m else ""])
+        return out
+
+    def after_write(self, ws) -> None:
+        # I 등록일 / J 답변일 날짜 표시서식
+        for col in ("I", "J"):
+            ws.format(f"{col}3:{col}1000",
+                      {"numberFormat": {"type": "DATE_TIME",
+                                        "pattern": "yyyy-mm-dd hh:mm"}})
+
+    def _scrape(self, driver):
+        return []
+
+
+@register
+class OnlineBookingChannel(ByulstarBase):
+    key, name, color = "online_booking", "온라인예약", "#FF9500"
+    LIST_URL = "https://www.byulstar.com/manager/online/list.php"
+
+    # 시트 매핑: list_table td#0~#9 → '온라인예약' 탭 B~K (헤더 순서 동일)
+    #   B번호 C확인유무 D신규구분 E이름 F연락처 G상담부위 H희망예약시간
+    #   I등록기기 J등록일 K선택삭제
+    # 필터: 확인유무(td#1 select)의 선택값이 '미확인'인 행만.
+    SHEET_TAB = "온라인예약"
+    SHEET_START = "B3"
+    SHEET_CLEAR = "B3:K1000"
+    TARGET_CONFIRM = "미확인"
+
+    def scrape(self, driver) -> List[dict]:
+        """online/list.php 에서 확인유무가 '미확인'인 행만 B~K로 추출. 실패 시 예외(시트 보호)."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "table.list_table tbody tr")))
+        time.sleep(1)
+
+        rows = driver.find_elements(By.CSS_SELECTOR, "table.list_table tbody tr")
+        out = []
+        for row in rows:
+            tds = row.find_elements(By.TAG_NAME, "td")
+            if len(tds) < 10:                       # 헤더행/빈행 제외
+                continue
+            confirm = self.select_value(row)         # td#1 확인유무 select 선택값
+            if confirm != self.TARGET_CONFIRM:       # '미확인' 아닌 행 제외
+                continue
+            out.append({
+                "no": tds[0].text.strip(),
+                "confirm": confirm,
+                "newbi": tds[2].text.strip(),
+                "name": tds[3].text.strip(),
+                "phone": tds[4].text.strip(),
+                "area": tds[5].text.strip(),
+                "want_time": tds[6].text.strip(),
+                "device": tds[7].text.strip(),
+                "reg": tds[8].text.strip(),
+                "del": tds[9].text.strip(),
+            })
+        return out
+
+    def to_sheet_rows(self, items: list) -> list:
+        return [[it["no"], it["confirm"], it["newbi"], it["name"], it["phone"],
+                 it["area"], _to_sheet_date(it["want_time"]), it["device"],
+                 _to_sheet_date(it["reg"]), it["del"]] for it in items]
+
+    def dashboard_rows(self, items: list) -> list:
+        # [이름, 내용=상담부위, 시각=등록일, 연락처]
+        return [[it["name"], it["area"], _to_sheet_date(it["reg"]), it["phone"]]
+                for it in items]
+
+    def after_write(self, ws) -> None:
+        # H 희망예약시간 / J 등록일 날짜 표시서식
+        for col in ("H", "J"):
+            ws.format(f"{col}3:{col}1000",
+                      {"numberFormat": {"type": "DATE_TIME",
+                                        "pattern": "yyyy-mm-dd hh:mm"}})
+
+    def _scrape(self, driver):
+        return []
+
+
+@register
+class KakaoTalkChannel(BaseChannel):
+    key, name, color = "kakaotalk", "카카오톡", "#F5C400"
+    LOGIN_URL = "https://center-pf.kakao.com/_hxlKxcxd/dashboard"
+    LIST_URL = "https://business.kakao.com/_hxlKxcxd/chats"       # 채팅 목록
+    USER_ID, USER_PW = account("kakaotalk")
+    CAPTCHA_WAIT = 150      # 2단계 인증(앱 승인)을 사람이 처리할 시간
+    LOGIN_SUBMIT_RETRY = 3  # 로그인 폼이 그대로 다시 뜰 때 submit 재시도 횟수
+    LOGIN_HELP = "python kakao_login.py 실행 후 카카오톡 앱에서 2단계 인증 승인"
+
+    # 시트 매핑: a.link_chat 블록 → '카카오톡' 탭
+    #   B 카톡이름(span.txt_name) C 내용(p.txt_info) D 시각(span.txt_date) E 개수(span.num_round)
+    # 필터: num_round >= 1(안 읽은 채팅)만.
+    SHEET_TAB = "카카오톡"
+    SHEET_START = "B3"
+    SHEET_CLEAR = "B3:F1000"
+
+    @staticmethod
+    def _at_login(driver) -> bool:
+        u = driver.current_url
+        return "accounts.kakao.com" in u or "/login" in u.lower()
+
+    def is_logged_in(self, driver) -> bool:
+        return not self._at_login(driver)
+
+    def _click_ico_check(self, driver) -> None:
+        """보이는 ico_check 체크박스 클릭(간편로그인 저장 / 2차인증 안 함)."""
+        from selenium.webdriver.common.by import By
+        try:
+            for s in driver.find_elements(By.CSS_SELECTOR, "span.ico_comm.ico_check"):
+                if s.is_displayed():
+                    s.click()
+                    return
+        except Exception:
+            pass
+
+    @staticmethod
+    def _login_form_id(driver):
+        """로그인 폼의 아이디 입력칸(보이는 것)을 반환. 없으면 None.
+        2단계 인증 화면도 accounts.kakao.com 이라 URL 만으로는 구분이 안 되므로,
+        '아이디 칸이 있다 = 아직 로그인 폼' 으로 판별한다."""
+        from selenium.webdriver.common.by import By
+        for e in driver.find_elements(By.CSS_SELECTOR, "input[name='loginId']"):
+            if e.is_displayed():
+                return e
+        return None
+
+    @staticmethod
+    def _login_error(driver) -> str:
+        """로그인 폼에 떠 있는 오류 문구(비밀번호 불일치 등). 없으면 빈 문자열.
+        오류가 있는데 submit 을 반복하면 계정이 잠기므로 재시도를 멈추는 근거로 쓴다."""
+        from selenium.webdriver.common.by import By
+        for sel in ("div.desc_error", "p.desc_error", "div.error_msg", "span.txt_error"):
+            for e in driver.find_elements(By.CSS_SELECTOR, sel):
+                if e.is_displayed() and e.text.strip():
+                    return e.text.strip()
+        return ""
+
+    def _submit_login(self, driver) -> bool:
+        """'로그인'(button.btn_g.highlight.submit) 클릭.
+        일반 클릭이 막히면 JS 클릭 → form.submit() 순으로 폴백한다."""
+        from selenium.webdriver.common.by import By
+        for by, sel in (
+                (By.CSS_SELECTOR, "div.confirm_btn button[type='submit']"),
+                (By.CSS_SELECTOR, "button.btn_g.highlight.submit"),
+                (By.XPATH, "//button[@type='submit'][normalize-space()='로그인']")):
+            for b in driver.find_elements(by, sel):
+                if not b.is_displayed():
+                    continue
+                try:
+                    b.click()
+                    return True
+                except Exception:
+                    try:
+                        driver.execute_script("arguments[0].click();", b)
+                        return True
+                    except Exception:
+                        pass
+        try:                                    # 버튼을 못 찾으면 폼을 직접 제출
+            driver.execute_script(
+                "document.querySelector(\"input[name='loginId']\").form.submit();")
+            return True
+        except Exception:
+            return False
+
+    def _fill_credentials(self, driver, id_in=None) -> None:
+        """아이디/비번 칸이 비어 있을 때만 채운다.
+        간편로그인으로 이미 채워진 화면(로그인 버튼만 누르면 되는 상태)은 건드리지 않는다."""
+        from selenium.webdriver.common.by import By
+        id_in = id_in or self._login_form_id(driver)
+        if id_in is None:
+            return
+        if not (id_in.get_attribute("value") or "").strip():
+            id_in.clear(); id_in.send_keys(self.USER_ID)
+            time.sleep(0.8)
+        for pw in driver.find_elements(By.CSS_SELECTOR, "input[name='password']"):
+            if not pw.is_displayed():
+                continue
+            if not (pw.get_attribute("value") or ""):
+                pw.clear(); pw.send_keys(self.USER_PW)
+                time.sleep(0.5)
+            break
+
+    def login(self, driver) -> bool:
+        """
+        카카오계정 로그인 → 2단계 인증이 뜨면 로그로 알리고 '이 기기에서 2차 인증 안 함'
+        체크 + '확인' 후, 사람이 카카오톡 앱에서 승인할 때까지 대기(CAPTCHA_WAIT).
+        (name 기반 셀렉터 사용 — loginId--1 등 --N 접미사 id는 자동생성이라 불안정)
+
+        submit 이 씹혀 로그인 폼이 그대로 남는 경우가 잦아서, 폼이 다시 보이면
+        (아이디/비번이 이미 채워진 화면 포함) '로그인' 버튼만 다시 눌러 넘긴다.
+        """
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        driver.get(self.LOGIN_URL)              # → accounts.kakao.com/login 리디렉션
+        wait = WebDriverWait(driver, 20)
+        id_in = wait.until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "input[name='loginId']")))
+        id_in.clear(); id_in.send_keys(self.USER_ID)
+        time.sleep(1)
+        pw = driver.find_element(By.CSS_SELECTOR, "input[name='password']")
+        pw.clear(); pw.send_keys(self.USER_PW)
+        time.sleep(0.5)
+
+        # 간편로그인 정보 저장 체크(세션 유지)
+        try:
+            box = driver.find_element(By.CSS_SELECTOR, "input[name='saveSignedIn']")
+            if not box.is_selected():
+                self._click_ico_check(driver)
+        except Exception:
+            pass
+
+        self._submit_login(driver)
+        time.sleep(4)
+
+        if self.is_logged_in(driver):           # 2차 인증 없이 통과
+            return True
+
+        # ── 로그인 폼이 그대로 남은 경우: '로그인' 버튼만 다시 누른다 ──
+        for i in range(1, self.LOGIN_SUBMIT_RETRY + 1):
+            f = self._login_form_id(driver)
+            if f is None:                       # 폼이 사라짐 = 2단계 인증 화면으로 넘어감
+                break
+            err = self._login_error(driver)
+            if err:                             # 비번 오류 등 — 더 눌러도 잠기기만 한다
+                print(f"[{self.name}] 로그인 실패: {err}")
+                return False
+            acc = (f.get_attribute("value") or "").strip()
+            print(f"[{self.name}] 로그인 폼 잔류 — '로그인' 재클릭 {i}/"
+                  f"{self.LOGIN_SUBMIT_RETRY} (계정: {acc or '비어있음'})")
+            self._fill_credentials(driver, f)   # 비어 있을 때만 채움
+            if not self._submit_login(driver):
+                print(f"[{self.name}] 로그인 버튼을 찾지 못했습니다.")
+                return False
+            time.sleep(4)
+            if self.is_logged_in(driver):
+                return True
+
+        if self.is_logged_in(driver):
+            return True
+        if self._login_form_id(driver) is not None:   # 아직도 폼 → 2FA 대기는 무의미
+            print(f"[{self.name}] 로그인 폼을 넘기지 못했습니다: "
+                  f"{self._login_error(driver) or '원인 불명'}")
+            return False
+
+        # ── 2단계 인증 화면 ──
+        print(f"[{self.name}] ⚠️ 2단계 인증 필요 — 카카오톡 앱에서 승인해 주세요.")
+        self._click_ico_check(driver)           # '이 기기에서 2차 인증 안 함' 체크
+        print(f"[{self.name}] '2차 인증 안 함' 체크 + 확인 · 수동 인증(앱 승인) 대기중...")
+        try:                                    # '확인' 클릭
+            for b in driver.find_elements(
+                    By.XPATH, "//button[normalize-space()='확인']"
+                              "|//*[@type='submit'][normalize-space()='확인']"):
+                if b.is_displayed():
+                    b.click()
+                    break
+        except Exception:
+            pass
+        try:                                    # 앱 승인 완료(=로그인화면 벗어남)까지 대기
+            WebDriverWait(driver, self.CAPTCHA_WAIT).until(
+                lambda d: self.is_logged_in(d))
+        except Exception:
+            print(f"[{self.name}] 2단계 인증 미완료(시간초과). 다시 실행해 주세요.")
+            return False
+        return True
+
+    @staticmethod
+    def _blk_text(blk, sel: str) -> str:
+        from selenium.webdriver.common.by import By
+        e = blk.find_elements(By.CSS_SELECTOR, sel)
+        return e[0].text.strip() if e else ""
+
+    def _unread(self, blk) -> int:
+        """span.num_round(안 읽은 개수). 없으면 0."""
+        from selenium.webdriver.common.by import By
+        e = blk.find_elements(By.CSS_SELECTOR, "span.num_round")
+        if not e:
+            return 0
+        digits = "".join(c for c in e[0].text if c.isdigit())
+        return int(digits) if digits else 0
+
+    def scrape(self, driver) -> List[dict]:
+        """채팅 목록에서 안 읽은(num_round>=1) 채팅만 추출. 실패 시 예외(시트 보호)."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "a.link_chat")))
+        time.sleep(1.5)
+
+        out = []
+        for blk in driver.find_elements(By.CSS_SELECTOR, "a.link_chat"):
+            n = self._unread(blk)
+            if n < 1:                           # 안 읽은 채팅만
+                continue
+            out.append({
+                "name": self._blk_text(blk, "span.txt_name"),
+                "info": self._blk_text(blk, "p.txt_info"),
+                "date": self._blk_text(blk, "span.txt_date"),
+                "num": n,
+            })
+        return out
+
+    def to_sheet_rows(self, items: list) -> list:
+        # B이름 C내용 D시각 E개수
+        return [[it["name"], it["info"], it["date"], it["num"]] for it in items]
+
+    def dashboard_rows(self, items: list) -> list:
+        # [이름=카톡이름, 내용, 시각(상대표시), 연락처=없음]
+        # 한 사람이 여러 톡을 보내도 '채팅방 1개 = 상담 1건'이므로 타일 숫자는 그대로 두고,
+        # 안 읽은 메시지 수(span.num_round)는 내용 앞에 붙여 상세에서 보이게 한다.
+        out = []
+        for it in items:
+            n = it.get("num", 0)
+            info = f"{it['info']} ({n})" if n > 1 else it["info"]
+            out.append([it["name"], info, it["date"], ""])
+        return out
+
+    def _scrape(self, driver):
+        return []
+
+
+def build_enabled_channels() -> List[BaseChannel]:
+    return [cls() for key, cls in _REGISTRY.items() if ENABLED.get(key, True)]
+
+
+def channel_meta() -> Dict[str, dict]:
+    return {k: {"name": c.name, "color": c.color} for k, c in _REGISTRY.items()}
+
+
+def channel_name(key: str) -> str:
+    c = _REGISTRY.get(key)
+    return c.name if c else key
+
+
+# ══════════════════════════════════════════════════════════════
+# [데모]  연동 전 테스트용 가짜 유입
+# ══════════════════════════════════════════════════════════════
+_NAMES = ["김민지", "이서연", "박지우", "최수빈", "정하은",
+          "강예린", "조은서", "윤채원", "임지호", "한소희", "익명"]
+_TREATMENTS = ["쌍꺼풀", "눈매교정", "코성형", "안면윤곽", "지방흡입",
+               "가슴성형", "보톡스", "필러", "리프팅", "눈밑지방재배치"]
+_MESSAGES = ["상담 가능한 시간 문의드려요.", "비용이 대략 어느 정도인가요?",
+             "회복 기간은 얼마나 걸리나요?", "예약하고 싶습니다.",
+             "상담만 먼저 받아볼 수 있을까요?", "견적 부탁드립니다.",
+             "후기 보고 연락드려요!", "주말에도 상담 되나요?"]
+
+
+def _generate_demo(channel: BaseChannel) -> List[Consultation]:
+    n = random.choices([0, 1, 2], weights=[5, 3, 2])[0]
+    if n == 0:
+        return []
+    base = int(datetime.now().timestamp() * 1000) % 100_000_000
+    out = []
+    for i in range(n):
+        ext = str(base + i)
+        out.append(Consultation(
+            id=channel.make_id(ext),
+            channel_key=channel.key,
+            external_id=ext,
+            customer_name=random.choice(_NAMES),
+            contact="010-****-" + f"{random.randint(0, 9999):04d}",
+            treatment=random.choice(_TREATMENTS),
+            message=random.choice(_MESSAGES),
+            received_at=datetime.now() - timedelta(minutes=random.randint(0, 120)),
+        ))
+    return out
+
+
+# ══════════════════════════════════════════════════════════════
+# [저장소]  공통 인터페이스 + 로컬(SQLite) / 구글시트(gspread)
+# ══════════════════════════════════════════════════════════════
+# 두 백엔드 모두 아래 dict 형태로 반환:
+#   {id, channel_key, customer_name, contact, treatment, message,
+#    received_at(iso str), status, confirmed(bool)}
+class LocalStore:
+    def __init__(self):
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with self._c() as c:
+            c.execute("""CREATE TABLE IF NOT EXISTS consultations (
+                id TEXT PRIMARY KEY, channel_key TEXT, customer_name TEXT,
+                contact TEXT, treatment TEXT, message TEXT, received_at TEXT,
+                status TEXT, confirmed INTEGER DEFAULT 0, raw TEXT)""")
+
+    def _c(self):
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def name(self) -> str:
+        return "로컬(SQLite)"
+
+    def upsert(self, items: List[Consultation]) -> int:
+        new = 0
+        with self._c() as c:
+            for it in items:
+                if c.execute("SELECT 1 FROM consultations WHERE id=?", (it.id,)).fetchone():
+                    continue
+                c.execute("""INSERT INTO consultations
+                    (id, channel_key, customer_name, contact, treatment, message,
+                     received_at, status, confirmed, raw)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (it.id, it.channel_key, it.customer_name, it.contact,
+                     it.treatment, it.message, it.received_at.isoformat(),
+                     it.status, int(it.confirmed),
+                     json.dumps(it.raw, ensure_ascii=False)))
+                new += 1
+        return new
+
+    def fetch_all(self) -> List[dict]:
+        with self._c() as c:
+            rows = c.execute("SELECT * FROM consultations ORDER BY received_at DESC").fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["confirmed"] = bool(d["confirmed"])
+            out.append(d)
+        return out
+
+    def mark_confirmed(self, ids: List[str]) -> None:
+        if not ids:
+            return
+        with self._c() as c:
+            c.executemany("UPDATE consultations SET confirmed=1 WHERE id=?",
+                          [(i,) for i in ids])
+
+
+class SheetStore:
+    HEADER = ["id", "채널", "고객명", "연락처", "관심시술", "내용",
+              "유입시각", "상태", "확인"]
+
+    def __init__(self):
+        self._ws = None
+
+    def name(self) -> str:
+        return "구글시트"
+
+    def _worksheet(self):
+        if self._ws is not None:
+            return self._ws
+        import gspread
+        gc = gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+        sh = gc.open_by_url(SHEET_URL)
+        try:
+            ws = sh.worksheet(SHEET_TAB)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(SHEET_TAB, rows=2000, cols=len(self.HEADER))
+            ws.append_row(self.HEADER)
+        if ws.row_values(1) != self.HEADER:
+            ws.update("A1", [self.HEADER])
+        self._ws = ws
+        return ws
+
+    def upsert(self, items: List[Consultation]) -> int:
+        ws = self._worksheet()
+        existing = set(ws.col_values(1)[1:])  # id 열(헤더 제외)
+        rows = []
+        for it in items:
+            if it.id in existing:
+                continue
+            rows.append([it.id, channel_name(it.channel_key), it.customer_name,
+                         it.contact, it.treatment, it.message,
+                         it.received_at.isoformat(timespec="minutes"),
+                         it.status, ""])
+        if rows:
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+        return len(rows)
+
+    def fetch_all(self) -> List[dict]:
+        ws = self._worksheet()
+        recs = ws.get_all_records(expected_headers=self.HEADER)
+        out = []
+        for r in recs:
+            rid = str(r.get("id", "")).strip()
+            if not rid:
+                continue
+            out.append({
+                "id": rid,
+                "channel_key": rid.split(":")[0],
+                "customer_name": r.get("고객명", ""),
+                "contact": r.get("연락처", ""),
+                "treatment": r.get("관심시술", ""),
+                "message": r.get("내용", ""),
+                "received_at": str(r.get("유입시각", "")),
+                "status": r.get("상태", "신규"),
+                "confirmed": bool(str(r.get("확인", "")).strip()),
+            })
+        out.sort(key=lambda d: d["received_at"], reverse=True)
+        return out
+
+    def mark_confirmed(self, ids: List[str]) -> None:
+        if not ids:
+            return
+        ws = self._worksheet()
+        col_ids = ws.col_values(1)
+        confirm_col = self.HEADER.index("확인") + 1
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        idset = set(ids)
+        for i, v in enumerate(col_ids):
+            if v in idset:
+                ws.update_cell(i + 1, confirm_col, stamp)
+
+
+def get_store():
+    """SHEET_URL 이 있으면 구글시트, 없으면 로컬."""
+    if SHEET_URL.strip():
+        return SheetStore()
+    return LocalStore()
+
+
+# ══════════════════════════════════════════════════════════════
+# [수집]  채널 순회
+# ══════════════════════════════════════════════════════════════
+def collect_all(store) -> int:
+    """활성 채널을 순회하며 수집·저장. 새로 추가된 건수 반환."""
+    total = 0
+    for ch in build_enabled_channels():
+        try:
+            items = ch.collect()
+            total += store.upsert(items)
+        except Exception as e:               # 한 채널 실패가 전체를 막지 않게
+            print(f"[{ch.name}] 수집 오류: {e}")
+    return total
+
+
+# ══════════════════════════════════════════════════════════════
+# [대시보드 기록]  채널 스크랩 결과 → 채널별 구글시트 탭
+# ══════════════════════════════════════════════════════════════
+# 일시적 오류로 보고 재시도할 HTTP 코드(429=분당 쓰기 쿼터 초과)
+_SHEET_RETRY_CODES = (429, 500, 502, 503)
+_FORMATTED_ONCE: set = set()        # 서식/헤더를 이미 적용한 채널 key
+
+
+def _api_code(e) -> Optional[int]:
+    """gspread APIError 에서 HTTP 상태코드 추출(버전별 차이 흡수)."""
+    v = getattr(e, "code", None)
+    if isinstance(v, int):
+        return v
+    try:
+        return int(e.response.status_code)
+    except Exception:
+        pass
+    m = re.search(r"'code':\s*(\d+)", str(e))
+    return int(m.group(1)) if m else None
+
+
+def _sheet_call(fn, *a, tries: int = 6, **kw):
+    """구글시트 API 호출 래퍼.
+    429(분당 쓰기 60회 초과) 같은 일시적 오류는 지수 백오프로 재시도한다.
+    ※ 이게 없으면 쿼터 한 번 초과에 수집기가 통째로 죽는다."""
+    import gspread
+    delay = 5.0
+    for i in range(tries):
+        try:
+            return fn(*a, **kw)
+        except gspread.exceptions.APIError as e:
+            code = _api_code(e)
+            if code not in _SHEET_RETRY_CODES or i == tries - 1:
+                raise
+            print(f"[시트] API {code} — {delay:.0f}초 후 재시도 ({i + 1}/{tries})")
+            sys.stdout.flush()
+            time.sleep(delay)
+            delay = min(delay * 2, 90)
+
+
+def _apply_format_once(ch: "BaseChannel", ws) -> None:
+    """헤더·날짜서식은 매번 바뀌지 않으므로 프로세스당 1회만 적용한다.
+    (채널당 1~3회 쓰기 × 6채널 = 사이클마다 최대 18회를 아낀다)"""
+    if ch.key in _FORMATTED_ONCE:
+        return
+    try:
+        _sheet_call(ch.after_write, ws)
+        _FORMATTED_ONCE.add(ch.key)
+    except Exception as e:
+        print(f"[{ch.name}] 서식 적용 오류(무시하고 진행): {e}")
+
+
+def write_channel_sheet(ch: "BaseChannel", items: list) -> int:
+    """
+    스크랩 성공분(items)만 시트에 기록.
+    ※ 반드시 hub.collect(ch) 가 성공(예외 없이 반환)했을 때만 호출할 것.
+      실패는 예외로 걸러져 이 함수까지 오지 않으므로, 여기서 clear 해도
+      '실패로 시트가 비워지는' 사고가 안 난다. (items=[] 는 '신규상담 0건'
+      이라는 정상 결과 → 시트를 정상적으로 비움)
+    """
+    import gspread
+    gc = gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+    ws = gc.open_by_url(GSHEET_URL).worksheet(ch.SHEET_TAB)
+
+    rows = ch.to_sheet_rows(items)
+    if ch.SHEET_CLEAR:
+        _sheet_call(ws.batch_clear, [ch.SHEET_CLEAR])
+
+    # 값 쓰기를 한 번의 batch_update 로 묶는다.
+    # (예전엔 rows / A1 / 잔액셀을 따로 호출해 채널당 3~4회를 썼다 →
+    #  6채널이면 분당 쓰기 60회 한도를 쉽게 넘겨 429 로 수집기가 죽었다)
+    data = []
+    if rows:
+        data.append({"range": ch.SHEET_START, "values": rows})
+    data.append({"range": "A1", "values": [[_now_stamp()]]})   # A2 수식은 안 건드림
+    for cell, val in (ch.header_cells or {}).items():          # 잔액 등
+        data.append({"range": cell, "values": [[val]]})
+    _sheet_call(ws.batch_update, data, value_input_option="USER_ENTERED")
+
+    _apply_format_once(ch, ws)      # 헤더·날짜서식은 프로세스당 1회만
+    return len(rows)
+
+
+_KOR_DOW = ["월", "화", "수", "목", "금", "토", "일"]
+
+
+def _now_stamp() -> str:
+    """'2026-07-10 (금) 14:30:05 업데이트 완료 · PC이름' 형식의 현재시각 문자열.
+    ※ PC 이름을 붙여야 여러 대에서 돌 때 '누가 썼는지'를 시트만 보고 알 수 있다."""
+    dt = datetime.now()
+    return (f"{dt:%Y-%m-%d} ({_KOR_DOW[dt.weekday()]}) {dt:%H:%M:%S} 업데이트 완료"
+            f" · {socket.gethostname()}")
+
+
+# ══════════════════════════════════════════════════════════════
+# [실패 분류]  '실패' 한 단어 대신 사유를 시트·GUI·웹앱에 그대로 전달
+# ══════════════════════════════════════════════════════════════
+@dataclass
+class CollectError:
+    """수집 실패 1건.
+    kind   = 짧은 사유. 시트 '미확인' 열에 들어가 화면에 그대로 표시된다.
+    detail = 예외 원문(1줄). 시트 '비고' 열 + 툴팁용."""
+    kind: str
+    detail: str
+
+
+# (판정 키워드, 표시 사유) — 위에서부터 먼저 맞는 규칙을 쓴다
+_ERROR_RULES = [
+    (("quota exceeded", "rate_limit_exceeded", "resource_exhausted"), "시트 쿼터 초과"),
+    (("백오프",), "로그인 대기"),
+    (("자동 로그인", "로그인 실패", "login"), "로그인 실패"),
+    (("timeout", "timed out", "시간초과"), "시간 초과"),
+    (("no such window", "target window already closed",
+      "web view not found"), "탭 닫힘"),
+    (("invalid session id", "session deleted", "not reachable",
+      "disconnected", "session not created"), "브라우저 끊김"),
+    (("unexpected alert", "alert"), "알림창 차단"),
+    (("no such element", "unable to locate element",
+      "stale element"), "추출 불가"),
+]
+
+
+def classify_error(exc: BaseException) -> CollectError:
+    """예외 → (짧은 사유, 원문). 어디에 걸렸는지 화면만 보고 알 수 있게 한다."""
+    msg = (str(exc) or "").strip() or exc.__class__.__name__
+    low = msg.lower()
+    kind = "수집 오류"
+    for keys, label in _ERROR_RULES:
+        if any(k in low for k in keys):
+            kind = label
+            break
+    return CollectError(kind, f"{exc.__class__.__name__}: {msg.splitlines()[0][:180]}")
+
+
+# ══════════════════════════════════════════════════════════════
+# [다중 PC 잠금]  구글시트 하트비트로 '수집기는 전체에서 한 대만'
+# ══════════════════════════════════════════════════════════════
+# 포트 잠금(acquire_collector_lock)은 같은 PC 안에서만 유효하다.
+# 여러 PC가 같은 시트를 쓰면 서로의 결과를 '실패'로 덮어쓰므로,
+# 시트 자체에 소유자와 하트비트를 남겨 한 대만 돌게 한다.
+#   H1 = 소유자 'PC이름|PID'      H2 = 하트비트 '2026-07-21 14:30:05'
+# ※ write_dashboard 가 A1:F1000 만 지우므로 H 열은 안전하다.
+# 집계 출력 탭. 옛 빌드/외부 프로그램이 하드코딩한 '대시보드' 를 피해 별도 탭에 쓴다.
+# → 그쪽이 계속 '대시보드' 를 덮어써도 이 탭은 오염되지 않는다.
+#   Code.gs 의 TAB 상수도 반드시 같은 값이어야 한다.
+DASHBOARD_TAB = "대시보드2"
+
+_LAST_WRITTEN_STAMP = ""        # write_dashboard 가 마지막으로 쓴 D1 값(외부 writer 탐지용)
+SHEET_LOCK_OWNER_CELL = "H1"
+SHEET_LOCK_BEAT_CELL = "H2"
+# 하트비트가 이보다 오래되면 그 PC 는 죽은 것으로 보고 잠금을 인계한다.
+# 하트비트를 수집 사이클과 분리해 HEARTBEAT_SEC(45초)마다 독립적으로 찍으므로,
+# 살아있는 수집기는 이 안에 반드시 여러 번 갱신한다 → 짧게 잡아도 오인 종료 없음.
+# (예전엔 사이클당 1회만 찍어 간격이 최대 300초까지 벌어져 420초로 크게 잡아야 했다)
+SHEET_LOCK_STALE_SEC = 180      # 3분. 다른 PC 종료 후 인계 대기시간(구 420초→180초)
+HEARTBEAT_SEC = 45              # 하트비트 갱신 주기(초). 사이클과 무관하게 백그라운드로 찍음
+
+
+def _machine_id() -> str:
+    return f"{socket.gethostname()}|{os.getpid()}"
+
+
+def _beat_age_sec(beat: str) -> Optional[int]:
+    """하트비트 문자열 → 몇 초 전인지. 못 읽으면 None(=판단 불가)."""
+    try:
+        dt = datetime.strptime((beat or "").strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return int((datetime.now() - dt).total_seconds())
+
+
+def _dash_ws(sh):
+    """집계 탭을 얻는다. 없으면 만든다(첫 실행/탭 이름 변경 대비)."""
+    import gspread
+    try:
+        return sh.worksheet(DASHBOARD_TAB)
+    except gspread.WorksheetNotFound:
+        return sh.add_worksheet(title=DASHBOARD_TAB, rows=1000, cols=12)
+
+
+def _lock_ws():
+    import gspread
+    gc = gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+    return _dash_ws(gc.open_by_url(GSHEET_URL))
+
+
+def _read_lock(ws) -> tuple:
+    rows = ws.get(f"{SHEET_LOCK_OWNER_CELL}:{SHEET_LOCK_BEAT_CELL}")
+    rows = (list(rows) + [[], []])[:2]
+    owner = (rows[0][0] if rows[0] else "").strip()
+    beat = (rows[1][0] if rows[1] else "").strip()
+    return owner, beat
+
+
+def _write_lock(ws, owner: str) -> None:
+    _sheet_call(ws.update,
+                values=[[owner], [f"{datetime.now():%Y-%m-%d %H:%M:%S}"]],
+                range_name=f"{SHEET_LOCK_OWNER_CELL}:{SHEET_LOCK_BEAT_CELL}",
+                value_input_option="RAW")
+
+
+def sheet_lock_blocker() -> Optional[str]:
+    """다른 PC가 잠금을 쥐고 있으면 그 소유자 문자열, 아니면 None.
+    같은 PC 이름의 잠금은 '죽은 흔적'이므로 막지 않는다 —
+    포트 잠금(9765)이 이 PC 안에 수집기가 하나뿐임을 이미 보장한다.
+    (GUI 가 시작 전에 확인하는 용도로도 쓴다)"""
+    try:
+        owner, beat = _read_lock(_lock_ws())
+    except Exception:
+        return None                     # 시트를 못 읽으면 막지 않음(수집기가 알아서 실패)
+    me = _machine_id()
+    if not owner or owner == me:
+        return None
+    if owner.split("|")[0] == socket.gethostname():
+        return None                     # 같은 PC의 잔여 잠금 → 회수 대상
+    age = _beat_age_sec(beat)
+    if age is None or age >= SHEET_LOCK_STALE_SEC:
+        return None                     # 하트비트 끊김 → 그 PC 는 죽었다고 보고 인계
+    return f"{owner} (하트비트 {age}초 전)"
+
+
+def claim_sheet_lock() -> tuple:
+    """수집기 시작 시 1회. (획득여부, 소유자문자열)."""
+    blocker = sheet_lock_blocker()
+    if blocker:
+        return False, blocker
+    ws = _lock_ws()
+    me = _machine_id()
+    _write_lock(ws, me)
+    time.sleep(3)                       # 동시 진입 시 늦게 쓴 쪽이 이기도록 재확인
+    owner2, _ = _read_lock(ws)
+    return (owner2 == me), owner2
+
+
+def refresh_sheet_lock() -> tuple:
+    """매 사이클 하트비트 갱신. 다른 PC가 가져갔으면 (False, 소유자)."""
+    ws = _lock_ws()
+    owner, _ = _read_lock(ws)
+    me = _machine_id()
+    if owner and owner != me:
+        return False, owner
+    _write_lock(ws, me)
+    return True, me
+
+
+def release_sheet_lock() -> None:
+    """이 PC 가 쥔 잠금을 반납한다(다른 PC 잠금은 건드리지 않음).
+    ※ PID 가 아니라 PC 이름으로 비교한다 — GUI 가 수집기를 terminate() 로 끄면
+      자식의 finally 가 안 돌아 잠금이 남는데, 그걸 GUI 가 대신 반납해야
+      다른 PC 가 7분(SHEET_LOCK_STALE_SEC)을 기다리지 않는다."""
+    try:
+        ws = _lock_ws()
+        owner, _ = _read_lock(ws)
+        if owner and owner.split("|")[0] == socket.gethostname():
+            ws.update(values=[[""], [""]],
+                      range_name=f"{SHEET_LOCK_OWNER_CELL}:{SHEET_LOCK_BEAT_CELL}",
+                      value_input_option="RAW")
+    except Exception:
+        pass
+
+
+def beat_sheet_lock() -> bool:
+    """하트비트(H1 소유자 + H2 시각)를 1회 갱신. 내가 소유자일 때만 쓴다.
+    다른 PC 가 소유자로 바뀌었으면 False(=인계됨) → 호출부가 하트비트를 멈춘다."""
+    ws = _lock_ws()
+    owner, _ = _read_lock(ws)
+    me = _machine_id()
+    # 남이 가져갔으면(같은 PC 이름의 잔여 잠금은 내 것으로 회수) 중단
+    if owner and owner != me and owner.split("|")[0] != socket.gethostname():
+        return False
+    _write_lock(ws, me)
+    return True
+
+
+def start_heartbeat() -> threading.Event:
+    """백그라운드에서 HEARTBEAT_SEC 마다 하트비트를 갱신하는 스레드 시작.
+
+    수집 순회(one_cycle)가 오래 걸려도 하트비트는 이 스레드가 계속 찍으므로,
+    다른 PC 는 이 수집기가 '살아있음'을 정확히 안다 → SHEET_LOCK_STALE_SEC 를
+    짧게(3분) 잡아도 라이브 수집기가 오인 종료되지 않는다.
+    반환된 Event 의 .set() 을 호출하면 다음 주기에 스레드가 멈춘다."""
+    stop = threading.Event()
+
+    def loop():
+        # stop.wait(t): t초 대기하다 stop 이 set 되면 True 반환 → 즉시 종료
+        while not stop.wait(HEARTBEAT_SEC):
+            try:
+                if not beat_sheet_lock():
+                    print("[하트비트] 잠금이 다른 PC로 인계됨 → 하트비트 중단")
+                    sys.stdout.flush()
+                    return
+            except Exception:
+                pass                    # 일시적 시트 오류는 무시(다음 주기 재시도)
+
+    threading.Thread(target=loop, daemon=True).start()
+    return stop
+
+
+# 대시보드에 표시할 채널 순서
+DASHBOARD_ORDER = ["gangnamunni", "babitalk", "naver_map",
+                   "online_consult", "online_booking", "kakaotalk"]
+
+
+INSTA_TAB = "인스타"
+
+
+def read_instagram_rows(sh) -> list:
+    """'인스타' 탭(IMPORTRANGE로 채워짐)에서 미연락 건만 읽어 대시보드 상세행으로.
+    구조(2행 헤더, 3행부터): A=No B=이름 C=신청시각 D=원하는부위 E=연락처
+                          F=연락여부(FALSE/TRUE) G=날짜 H=채널
+    반환: [[이름, 신청항목, 시각(G열), 연락처], ...]  (F=FALSE & 이름 있음)
+    """
+    ws = sh.worksheet(INSTA_TAB)
+    rows = []
+    for r in ws.get("A3:H1000"):
+        r = (list(r) + [""] * 8)[:8]          # 뒤쪽 빈 셀 패딩
+        name = (r[1] or "").strip()           # B
+        contacted = (r[5] or "").strip().upper()  # F
+        if not name or contacted != "FALSE":  # 빈 행·이미 연락(TRUE) 제외
+            continue
+        rows.append([name,                    # 이름
+                     (r[3] or "").strip(),     # D 신청항목
+                     _to_sheet_date((r[6] or "").strip()),  # G 날짜
+                     (r[4] or "").strip()])    # E 연락처
+    return rows
+
+
+# ══════════════════════════════════════════════════════════════
+# [텔레그램 알림]  새 상담 / 수집 실패를 push. 이미 알린 건은 파일로 기억.
+# ══════════════════════════════════════════════════════════════
+NOTIFY_PATH = BASE_DIR / "notified.json"      # 이미 알린 지문 저장(중복 알림 방지)
+_NOTIFY_KEEP_SEC = 7 * 24 * 3600              # 이 기간 지난 지문은 정리(파일 비대 방지)
+
+
+def telegram_enabled() -> bool:
+    return bool(TELEGRAM_TOKEN.strip() and TELEGRAM_CHAT_ID.strip())
+
+
+def send_telegram(text: str) -> bool:
+    """텔레그램 메시지 전송. 실패해도 수집을 막지 않도록 예외를 삼킨다."""
+    if not telegram_enabled():
+        return False
+    import requests
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        r = requests.post(url, timeout=10, data={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        })
+        if r.status_code != 200:
+            print(f"[텔레그램] 전송 실패 {r.status_code}: {r.text[:150]}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[텔레그램] 전송 오류: {e}")
+        return False
+
+
+def _load_notify_state() -> dict:
+    """{'seen': {지문: 마지막본시각}, 'fail': {채널: 마지막알림시각}}"""
+    try:
+        d = json.loads(NOTIFY_PATH.read_text(encoding="utf-8"))
+        d.setdefault("seen", {})
+        d.setdefault("fail", {})
+        d.setdefault("prev_unread", 0)
+        return d
+    except Exception:
+        return {"seen": {}, "fail": {}, "prev_unread": 0, "_fresh": True}   # 파일 없음 = 첫 실행
+
+
+def _save_notify_state(state: dict) -> None:
+    now = time.time()
+    # 오래된 지문 정리
+    state["seen"] = {k: v for k, v in state.get("seen", {}).items()
+                     if now - v < _NOTIFY_KEEP_SEC}
+    state.pop("_fresh", None)
+    try:
+        NOTIFY_PATH.write_text(json.dumps(state, ensure_ascii=False),
+                               encoding="utf-8")
+    except Exception as e:
+        print(f"[텔레그램] 상태 저장 오류: {e}")
+
+
+def _row_fingerprint(row: list) -> str:
+    """상세행 [채널, 이름, 내용, 시각, 연락처] → 안정적 지문.
+    시각은 카카오톡 상대표시('오전 11:10')처럼 바뀌므로 제외한다."""
+    ch, name, info, _t, contact = (list(row) + [""] * 5)[:5]
+    return "|".join(str(x).strip() for x in (ch, name, contact, info))
+
+
+def _collector_footer() -> str:
+    """알림 하단에 붙일 '🖥 PC · 작동 중 · N분 전' 문구.
+    시트 D1 스탬프에서 수집 PC와 경과 시간을 뽑아 대시보드와 같은 표기를 쓴다."""
+    try:
+        stamp = read_dashboard_data().get("updated", "")
+    except Exception:
+        stamp = ""
+    host = socket.gethostname()
+    if " · " in stamp:                      # '… 완료 · DESKTOP-QDP5L4A'
+        host = stamp.rsplit(" · ", 1)[1].strip() or host
+    mins = _stamp_minutes_ago(stamp)
+    when = "방금" if mins == 0 else (f"{mins}분 전" if mins is not None else "시각 미상")
+    return f"\n\n<i>🖥 {host} · 작동 중 · {when}</i>"
+
+
+def notify_new_and_failures(detail_rows: list, failed: list,
+                            total_unread: int = None) -> None:
+    """detail_rows: [[채널,이름,내용,시각,연락처], ...] (헤더 제외)
+       failed: [(채널명, 사유), ...]
+       total_unread: 전체 미확인 건수(메시지에 표기). None 이면 detail_rows 수로 대체.
+    새 상담 → 건별 알림, 수집 실패 → 채널별 재알림 간격 두고 알림."""
+    if total_unread is None:
+        total_unread = len(detail_rows)
+    if not telegram_enabled():
+        return
+    state = _load_notify_state()
+    seen = state["seen"]
+    fresh = state.get("_fresh", False)      # 첫 실행이면 폭탄 방지: 알리지 않고 학습만
+    now = time.time()
+
+    # ── 새 상담 ──
+    new_rows = []
+    for row in detail_rows:
+        fp = _row_fingerprint(row)
+        if fp not in seen:
+            new_rows.append(row)
+        seen[fp] = now                      # 봤으므로 갱신(재알림 방지)
+
+    if new_rows and not fresh:
+        # 채널별로 묶어서 한 메시지에(알림 폭탄 방지)
+        from collections import defaultdict
+        by_ch = defaultdict(list)
+        for ch, name, info, t, contact in (
+                (r + [""] * 5)[:5] for r in new_rows):
+            by_ch[ch].append((name, info, t, contact))
+        # 헤더: 새 상담 N건 + 전체 미확인 M건
+        lines = [f"🔔 <b>새 상담 {len(new_rows)}건</b> · 전체 미확인 {total_unread}건"]
+        for ch, rows in by_ch.items():
+            lines.append(f"\n<b>[{ch}]</b> {len(rows)}건")
+            for name, info, t, contact in rows[:10]:   # 채널당 최대 10건 표기
+                c = f"\n   📞 {contact}" if contact else ""
+                tt = f" · {t}" if t else ""
+                lines.append(f"• <b>{name}</b>{tt}\n   💬 {info}{c}")
+            if len(rows) > 10:
+                lines.append(f"… 외 {len(rows) - 10}건")
+        send_telegram("\n".join(lines) + _collector_footer())
+
+    # ── 모두 처리 완료(미확인이 있다가 0건이 된 순간에만 1회) ──
+    #    계속 0건이면 조용. prev_unread 로 전환 시점만 잡는다.
+    #    ※ 수집 실패로 0이 된 걸 '완료'로 오인하지 않도록 실패 없을 때만 보낸다.
+    prev_unread = state.get("prev_unread", 0)
+    if not fresh and prev_unread > 0 and total_unread == 0 and not failed:
+        send_telegram("✅ <b>미확인 상담 모두 처리 완료</b>\n"
+                      "대기 중인 상담이 없습니다." + _collector_footer())
+    # 실패로 0이 된 경우엔 prev_unread 를 덮지 않는다(실패 해소 뒤 재판정 위해).
+    if not failed:
+        state["prev_unread"] = total_unread
+
+    # ── 수집 실패(재알림 간격 적용) ──
+    if not fresh:
+        for ch_name, reason in failed:
+            last = state["fail"].get(ch_name, 0)
+            if now - last >= TELEGRAM_FAIL_RENOTIFY_MIN * 60:
+                if send_telegram(f"⚠️ <b>{ch_name} 수집 실패</b>\n{reason}"
+                                 + _collector_footer()):
+                    state["fail"][ch_name] = now
+    # 실패가 해소된 채널은 재알림 타이머 초기화
+    failed_names = {n for n, _ in failed}
+    for n in list(state["fail"]):
+        if n not in failed_names:
+            state["fail"].pop(n, None)
+
+    _save_notify_state(state)
+
+
+def write_dashboard(results: list) -> None:
+    """
+    results: [(channel, items|None)]  (None=이번 사이클 수집 실패)
+    '대시보드' 탭에 요약(채널별 미확인수+잔액) + 상세(통합목록) + 업데이트 시각 기록.
+    실패한 채널은 시트의 기존 값(미확인수/잔액)을 유지한다.
+    """
+    import gspread
+    gc = gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+    sh = gc.open_by_url(GSHEET_URL)
+    ws = _dash_ws(sh)
+
+    by_key = {ch.key: (ch, items) for ch, items in results}
+
+    # 실패 채널의 기존 값 유지를 위해 현재 요약 읽기 {채널명: [미확인, 잔액, 비고]}
+    prev = {}
+    try:
+        for row in ws.get("A4:D12"):
+            if row and row[0]:
+                prev[row[0]] = (row[1:] + ["", "", ""])[:3]
+    except Exception:
+        pass
+
+    summary = [["🔔 상담 통합 대시보드", "", "", _now_stamp()],
+               [],
+               ["채널", "미확인", "잔액", "비고"]]
+    detail = [["채널", "이름", "내용", "시각", "연락처"]]
+    failed = []                             # 텔레그램 실패 알림용 [(채널명, 사유)]
+    total = 0
+
+    for key in DASHBOARD_ORDER:
+        pair = by_key.get(key)
+        if not pair:
+            continue
+        ch, items = pair
+        # 수집 실패 → 사유를 그대로 기록(잔액은 이전값 유지, 비고에 예외 원문)
+        if isinstance(items, CollectError):
+            p = prev.get(ch.name, ["", "", ""])
+            summary.append([ch.name, items.kind, p[1], items.detail])
+            failed.append((ch.name, f"{items.kind} · {items.detail}"))
+            continue
+        if items is None:                       # 사유 미상(구버전 호출 호환)
+            p = prev.get(ch.name, ["", "", ""])
+            summary.append([ch.name, "실패", p[1], p[2]])
+            continue
+        cnt = len(items)
+        total += cnt
+        summary.append([ch.name, cnt,
+                        ch.header_cells.get("E1", ""),
+                        ch.header_cells.get("F1", "")])
+        for r in ch.dashboard_rows(items):
+            detail.append([ch.name] + list(r))
+
+    # 인스타: 스크랩 없이 '인스타' 탭(IMPORTRANGE) 데이터만 읽어 합침
+    #   B=이름 D=신청항목 E=연락처 F=연락여부 G=날짜, F가 FALSE(미연락)인 행만
+    try:
+        insta = read_instagram_rows(sh)
+        summary.append(["인스타", len(insta), "", ""])
+        total += len(insta)
+        for r in insta:
+            detail.append(["인스타"] + list(r))
+    except Exception as e:
+        err = classify_error(e)
+        print(f"[인스타] 시트 읽기 오류: {err.detail}")
+        p = prev.get("인스타", ["", "", ""])
+        summary.append(["인스타", err.kind, p[1], err.detail])
+        failed.append(("인스타", f"{err.kind} · {err.detail}"))
+
+    summary.append(["합계", total, "", ""])
+
+    # 텔레그램 알림(새 상담·수집 실패). 시트 기록과 무관하게 예외를 삼킨다.
+    try:
+        notify_new_and_failures(detail[1:], failed, total_unread=total)   # 헤더 제외
+    except Exception as e:
+        print(f"[텔레그램] 알림 처리 오류: {e}")
+
+    # 외부 writer 탐지: 지난번 내가 쓴 스탬프가 그대로 남아있어야 정상이다.
+    # 다르면 이 잠금을 모르는 다른 프로그램(옛 빌드 등)이 덮어쓰고 있다는 뜻.
+    global _LAST_WRITTEN_STAMP
+    if _LAST_WRITTEN_STAMP:
+        try:
+            cur = (ws.acell("D1").value or "").strip()
+            if cur and cur != _LAST_WRITTEN_STAMP:
+                print(f"[경고] 외부 writer 감지 — 내가 쓴 값이 바뀌었습니다.\n"
+                      f"       내가 쓴 값 : {_LAST_WRITTEN_STAMP}\n"
+                      f"       현재 값    : {cur}\n"
+                      f"       → 다른 PC/옛 빌드가 같은 시트를 쓰고 있습니다.")
+        except Exception:
+            pass
+
+    _sheet_call(ws.batch_clear, ["A1:F1000"])
+    _sheet_call(ws.update, values=summary, range_name="A1",
+                value_input_option="USER_ENTERED")
+    _LAST_WRITTEN_STAMP = summary[0][3]
+    # 상세는 RAW로 기록: 카카오톡 '오전 11:10' 같은 상대시각이 시트에서
+    # 시간값(1899-12-30 …)으로 자동변환되지 않고 문자 그대로 남게 한다.
+    _sheet_call(ws.update, values=detail, range_name="A" + str(len(summary) + 2),
+                value_input_option="RAW")
+
+
+# ══════════════════════════════════════════════════════════════
+# [연동 상태]  각 구글시트 탭의 최종 업데이트 시각 읽기(모니터링용)
+# ══════════════════════════════════════════════════════════════
+# (표시이름, 시트탭이름, 스탬프가 있는 셀)
+#   채널 탭   → A1 에 '… 업데이트 완료' (write_channel_sheet)
+#   대시보드 탭 → D1 에 요약 업데이트 시각 (write_dashboard)
+SHEET_STATUS_TABS = [
+    ("대시보드", DASHBOARD_TAB, "D1"),
+    ("강남언니", "강남언니", "A1"),
+    ("바비톡", "바비톡", "A1"),
+    ("네이버지도", "네이버지도", "A1"),
+    ("온라인상담", "온라인상담", "A1"),
+    ("온라인예약", "온라인예약", "A1"),
+    ("카카오톡", "카카오톡", "A1"),
+]
+
+# 마지막 업데이트가 이 시간(분)을 넘으면 '지연/중단'으로 간주
+FRESH_MIN = 15          # 이내 → 🟢 정상
+STALE_MIN = 60          # 이내 → 🟡 지연 / 넘으면 🔴 중단 의심
+
+
+def _stamp_minutes_ago(stamp: str) -> Optional[int]:
+    """'2026-07-10 (금) 14:30:05 …' → 지금으로부터 몇 분 전인지. 못 읽으면 None."""
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2}).*?(\d{1,2}):(\d{2})(?::(\d{2}))?",
+                  stamp or "")
+    if not m:
+        return None
+    try:
+        dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                      int(m.group(4)), int(m.group(5)), int(m.group(6) or 0))
+    except ValueError:
+        return None
+    return max(0, int((datetime.now() - dt).total_seconds() // 60))
+
+
+def read_sheet_status() -> dict:
+    """
+    구글시트에 연결해 각 탭의 최종 업데이트 스탬프를 '한 번의 API 호출'로 읽는다.
+    반환: {"ok": bool, "error": str, "rows": [(표시이름, 스탬프문자열|""), ...]}
+    """
+    try:
+        import gspread
+        gc = gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+        sh = gc.open_by_url(GSHEET_URL)
+        ranges = [f"'{tab}'!{cell}" for _, tab, cell in SHEET_STATUS_TABS]
+        resp = sh.values_batch_get(ranges)
+        vrs = resp.get("valueRanges", [])
+        rows = []
+        for (label, _, _), vr in zip(SHEET_STATUS_TABS, vrs):
+            vals = vr.get("values", [])
+            stamp = vals[0][0] if (vals and vals[0]) else ""
+            rows.append((label, stamp))
+        return {"ok": True, "error": "", "rows": rows}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "rows": []}
+
+
+def read_dashboard_data() -> dict:
+    """
+    '대시보드' 탭을 읽어 웹앱(getDashboard)과 동일한 형태로 반환.
+      {"ok", "error", "updated",
+       "channels": [{"name","count","balance","note"}],
+       "items":    [[채널, 이름, 내용, 시각, 연락처], ...]}
+    count 는 문자열('실패' 가능). 파싱은 화면단에서 처리.
+    """
+    try:
+        import gspread
+        gc = gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+        sh = gc.open_by_url(GSHEET_URL)
+        v = _dash_ws(sh).get_all_values()               # 1 API 호출
+    except Exception as e:
+        return {"ok": False, "error": str(e), "updated": "",
+                "channels": [], "items": []}
+
+    def cell(row, j):
+        return row[j].strip() if len(row) > j else ""
+
+    updated = cell(v[0], 3) if v else ""     # D1
+
+    # 요약: '채널'+'미확인' 헤더 다음 ~ '합계'/빈 행 전까지
+    channels, ss = [], -1
+    for i, row in enumerate(v):
+        if cell(row, 0) == "채널" and cell(row, 1) == "미확인":
+            ss = i + 1
+            break
+    if ss >= 0:
+        for row in v[ss:]:
+            name = cell(row, 0)
+            if not name or name == "합계":
+                break
+            channels.append({"name": name, "count": cell(row, 1),
+                             "balance": cell(row, 2), "note": cell(row, 3)})
+
+    # 상세: '채널'+'이름' 헤더 다음 ~ 빈 행 전까지
+    items, ds = [], -1
+    for i, row in enumerate(v):
+        if cell(row, 0) == "채널" and cell(row, 1) == "이름":
+            ds = i + 1
+            break
+    if ds >= 0:
+        for row in v[ds:]:
+            if not cell(row, 0):
+                break
+            items.append([cell(row, j) for j in range(5)])
+
+    return {"ok": True, "error": "", "updated": updated,
+            "channels": channels, "items": items}
+
+
+# ══════════════════════════════════════════════════════════════
+# [화면]  Tkinter GUI  (구글시트 '대시보드' 탭을 그대로 표시 = 웹과 동일)
+# ══════════════════════════════════════════════════════════════
+# 대시보드 상세 컬럼(구글시트 '대시보드' 탭 상세블록과 동일): 채널·이름·내용·시각·연락처
+COLS = [
+    ("channel", "채널", 100),
+    ("name", "이름", 90),
+    ("message", "내용", 360),
+    ("time", "시각", 150),
+    ("contact", "연락처", 130),
+]
+
+# 대시보드에 표시할 채널 순서 + 색(웹 Index.html 과 동일)
+DASH_CHANNELS = [
+    ("강남언니", "#EC4899"),
+    ("바비톡", "#8B5CF6"),
+    ("네이버지도", "#03C75A"),
+    ("온라인상담", "#1E90FF"),
+    ("온라인예약", "#FF9500"),
+    ("카카오톡", "#E0AC00"),
+    ("인스타", "#C13584"),
+]
+DASH_COLOR = dict(DASH_CHANNELS)
+
+# 연동상태 행과 카드 행의 세로줄을 맞추기 위한 공통 여백(둘 다 이 값을 쓴다)
+GRID_PAD = 16          # 바깥 좌우 여백
+CELL_PAD = 3           # 셀 사이 간격
+# 스크랩 대상 채널(= 시트 탭 스탬프가 있는 것). '대시보드'는 채널이 아니라 제외.
+STATUS_LABELS = {label for label, _tab, _cell in SHEET_STATUS_TABS} - {"대시보드"}
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("상담 통합 대시보드")
+        self.geometry("1200x740")
+        self.configure(bg="#F4F5F7")
+        self.meta = channel_meta()
+        # 화면 데이터 = 구글시트 '대시보드' 탭 (웹앱과 동일 소스)
+        self.dash = {"updated": "", "channels": [], "items": []}
+        self.card_widgets: Dict[str, Dict[str, tk.Widget]] = {}
+        self._loading = False
+        self._fail_detail: Dict[str, str] = {}   # 채널명 → 실패 예외 원문(비고 열)
+        self.collector_proc = None         # run_dashboard.py 백그라운드 프로세스
+
+        self.auto_var = tk.BooleanVar(value=False)  # 기본: 중지 — '수집기 켜기'로 수동 시작
+        self.channel_var = tk.StringVar(value="전체")
+        self.search_var = tk.StringVar()
+
+        self._sheet_status_job = None
+        self._dash_job = None
+
+        self._build_styles()
+        self._build_header()
+        self._build_sheet_status()         # 구글시트 연동 상태 패널
+        self._build_cards()
+        self._build_toolbar()
+        self._build_table()
+        self._build_statusbar()
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)  # 종료 시 수집기도 정리
+        self.after(300, self.refresh_dashboard)       # 대시보드 시트 읽어 화면 채움
+        self.after(600, self.refresh_sheet_status)    # 연동상태(각 시트 시각) 조회
+        self.after(1200, self._boot_collector)        # 자동수집이면 수집기 시작
+        self.after(2500, self._poll_collector)        # 수집기 상태 표시 루프
+
+    # ── 스타일 ───────────────────────────────────────────────
+    def _build_styles(self):
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure("Treeview", font=FONT, rowheight=28,
+                        background="white", fieldbackground="white")
+        style.configure("Treeview.Heading", font=FONT_BOLD)
+
+    def _build_header(self):
+        h = tk.Frame(self, bg="#F4F5F7")
+        h.pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(h, text="🏥 상담 통합 대시보드", font=FONT_TITLE,
+                 bg="#F4F5F7", fg="#222").pack(side="left")
+        self.alert = tk.Label(h, text="", font=FONT_BOLD, bg="#F4F5F7", padx=12,
+                              cursor="hand2")
+        self.alert.pack(side="right")
+        self.alert.bind("<Button-1>", lambda e: self._show_fail_detail())
+
+    # ── 구글시트 연동 상태 패널 ──────────────────────────────
+    def _build_sheet_status(self):
+        panel = tk.Frame(self, bg="white",
+                         highlightbackground="#E1E4E8", highlightthickness=1)
+        panel.pack(fill="x", padx=GRID_PAD, pady=(4, 2))
+
+        # 상단 줄: 제목 · 연결상태 · 대시보드 갱신시각 · 새로고침
+        top = tk.Frame(panel, bg="white")
+        top.pack(fill="x", padx=GRID_PAD - 4, pady=(8, 4))
+        tk.Label(top, text="🔗 구글시트 연동 상태", font=FONT_BOLD,
+                 bg="white", fg="#333").pack(side="left")
+        self.conn_lbl = tk.Label(top, text="확인 중…", font=FONT,
+                                 bg="white", fg="#868E96")
+        self.conn_lbl.pack(side="left", padx=(10, 0))
+        # '대시보드' 탭은 채널이 아니라 전체 하트비트 → 아래 격자 대신 여기 표기
+        self.dash_stamp_lbl = tk.Label(top, text="", font=("맑은 고딕", 9),
+                                       bg="white", fg="#868E96")
+        self.dash_stamp_lbl.pack(side="left", padx=(12, 0))
+        tk.Button(top, text="🔄 상태 새로고침", font=("맑은 고딕", 9), relief="flat",
+                  bg="#E9ECEF", padx=8, pady=1,
+                  command=self.refresh_sheet_status).pack(side="right")
+        self.sheet_updated_lbl = tk.Label(top, text="", font=("맑은 고딕", 9),
+                                          bg="white", fg="#868E96")
+        self.sheet_updated_lbl.pack(side="right", padx=(0, 10))
+
+        # 채널별 상태(이름 / 최종 업데이트 / 경과·상태).
+        # 열 구성을 DASH_CHANNELS 로 맞춰 아래 카드 행과 세로줄이 정렬되게 한다.
+        grid = tk.Frame(panel, bg="white")
+        grid.pack(fill="x", padx=GRID_PAD - 4, pady=(0, 10))
+        self.sheet_cells: Dict[str, Dict[str, tk.Widget]] = {}
+        for i, (label, _color) in enumerate(DASH_CHANNELS):
+            cell = tk.Frame(grid, bg="#F8F9FA",
+                            highlightbackground="#E9ECEF", highlightthickness=1)
+            cell.grid(row=0, column=i, sticky="nsew", padx=CELL_PAD, pady=2)
+            grid.columnconfigure(i, weight=1, uniform="ch")
+            tk.Label(cell, text=label, font=("맑은 고딕", 9, "bold"),
+                     bg="#F8F9FA", fg="#495057").pack(anchor="w", padx=8, pady=(5, 0))
+            time_lbl = tk.Label(cell, text="—", font=("맑은 고딕", 9),
+                                bg="#F8F9FA", fg="#212529")
+            time_lbl.pack(anchor="w", padx=8)
+            state_lbl = tk.Label(cell, text="조회 전", font=("맑은 고딕", 9, "bold"),
+                                 bg="#F8F9FA", fg="#868E96")
+            state_lbl.pack(anchor="w", padx=8, pady=(0, 5))
+            if label in STATUS_LABELS:
+                self.sheet_cells[label] = {"time": time_lbl, "state": state_lbl}
+            else:                       # 인스타: 스크랩 대상 아님(IMPORTRANGE 집계)
+                time_lbl.config(text="—")
+                state_lbl.config(text="시트 연동", fg="#868E96")
+
+    def refresh_sheet_status(self):
+        """백그라운드로 시트 상태를 읽어와 패널 갱신(네트워크 → 스레드)."""
+        if self._sheet_status_job:
+            self.after_cancel(self._sheet_status_job)
+            self._sheet_status_job = None
+        self.conn_lbl.config(text="확인 중…", fg="#868E96")
+        threading.Thread(target=self._sheet_status_worker, daemon=True).start()
+
+    def _sheet_status_worker(self):
+        result = read_sheet_status()
+        self.after(0, lambda: self._apply_sheet_status(result))
+
+    def _apply_sheet_status(self, result: dict):
+        if not result["ok"]:
+            self.conn_lbl.config(text="✕ 연결 오류", fg="#E03131")
+            self.sheet_updated_lbl.config(text=result["error"][:60])
+            self.dash_stamp_lbl.config(text="", fg="#868E96")
+            for w in self.sheet_cells.values():
+                w["time"].config(text="—")
+                w["state"].config(text="확인 불가", fg="#868E96")
+        else:
+            self.conn_lbl.config(text="● 연결됨", fg="#2F9E44")
+            self.sheet_updated_lbl.config(
+                text=f"조회 {datetime.now():%H:%M:%S}")
+            stamps = dict(result["rows"])
+
+            # 대시보드(전체 하트비트) — 격자 대신 제목 옆에 표기
+            dmins = _stamp_minutes_ago(stamps.get("대시보드", ""))
+            if dmins is None:
+                self.dash_stamp_lbl.config(text="· 대시보드 기록 없음", fg="#868E96")
+            elif dmins <= FRESH_MIN:
+                self.dash_stamp_lbl.config(text=f"· 대시보드 🟢 {dmins}분 전", fg="#2F9E44")
+            elif dmins <= STALE_MIN:
+                self.dash_stamp_lbl.config(text=f"· 대시보드 🟡 {dmins}분 전", fg="#F08C00")
+            else:
+                dt = f"{dmins//60}시간 전" if dmins >= 120 else f"{dmins}분 전"
+                self.dash_stamp_lbl.config(text=f"· 대시보드 🔴 {dt}", fg="#E03131")
+
+            for label, w in self.sheet_cells.items():
+                stamp = stamps.get(label, "")
+                mins = _stamp_minutes_ago(stamp)
+                # 시각 표시: 'MM-DD HH:MM' 로 축약
+                mt = re.search(r"(\d{4})-(\d{2}-\d{2}).*?(\d{1,2}:\d{2})", stamp or "")
+                w["time"].config(text=f"{mt.group(2)} {mt.group(3)}" if mt else "기록 없음")
+                if mins is None:
+                    w["state"].config(text="⚪ 미기록", fg="#868E96")
+                elif mins <= FRESH_MIN:
+                    w["state"].config(text=f"🟢 정상 · {mins}분 전", fg="#2F9E44")
+                elif mins <= STALE_MIN:
+                    w["state"].config(text=f"🟡 지연 · {mins}분 전", fg="#F08C00")
+                else:
+                    txt = f"{mins//60}시간 전" if mins >= 120 else f"{mins}분 전"
+                    w["state"].config(text=f"🔴 중단? · {txt}", fg="#E03131")
+        self._sheet_status_job = self.after(GUI_REFRESH_SEC * 1000, self.refresh_sheet_status)
+
+    def _build_cards(self):
+        wrap = tk.Frame(self, bg="#F4F5F7")
+        wrap.pack(fill="x", padx=GRID_PAD, pady=4)
+        # 위 연동상태 행과 동일한 열 구성·여백 → 세로줄이 정확히 맞음
+        for i, (name, color) in enumerate(DASH_CHANNELS):
+            card = tk.Frame(wrap, bg="white",
+                            highlightbackground="#E1E4E8", highlightthickness=1)
+            card.grid(row=0, column=i, sticky="nsew", padx=CELL_PAD, pady=2)
+            wrap.columnconfigure(i, weight=1, uniform="ch")
+            bar = tk.Frame(card, bg=color, width=6)
+            bar.pack(side="left", fill="y")
+            inner = tk.Frame(card, bg="white")
+            inner.pack(side="left", fill="both", expand=True, padx=8, pady=6)
+            tk.Label(inner, text=name, font=FONT_BOLD, bg="white",
+                     fg="#333").pack(anchor="w")
+            cnt = tk.Label(inner, text="–", font=("맑은 고딕", 18, "bold"),
+                           bg="white", fg="#111")
+            cnt.pack(anchor="w")
+            badge = tk.Label(inner, text="", font=("맑은 고딕", 9, "bold"),
+                             bg="white", fg="#E03131")
+            badge.pack(anchor="w")
+            self.card_widgets[name] = {"count": cnt, "badge": badge, "bar": bar}
+
+    def _build_toolbar(self):
+        bar = tk.Frame(self, bg="#F4F5F7")
+        bar.pack(fill="x", padx=16, pady=(8, 4))
+        tk.Button(bar, text="🔄 새로고침", font=FONT_BOLD, bg="#1E90FF", fg="white",
+                  relief="flat", padx=12, pady=4,
+                  command=self.refresh_dashboard).pack(side="left")
+        tk.Button(bar, text="🔑 채널 로그인", font=FONT, bg="#E9ECEF", relief="flat",
+                  padx=10, pady=4, command=self.open_login_dialog).pack(side="left", padx=(6, 0))
+        self.collector_btn = tk.Button(bar, text="", font=FONT_BOLD, relief="flat",
+                                       padx=12, pady=4, command=self._toggle_collector)
+        self.collector_btn.pack(side="left", padx=(16, 0))
+        self.collector_state = tk.Label(bar, text="", font=FONT, bg="#F4F5F7")
+        self.collector_state.pack(side="left", padx=(6, 0))
+        tk.Button(bar, text="📄 로그", font=FONT, bg="#E9ECEF", relief="flat",
+                  padx=10, pady=4, command=self._open_log).pack(side="left", padx=(6, 0))
+        tk.Button(bar, text="🌐 웹 대시보드", font=FONT, bg="#E7F5FF", fg="#1971C2",
+                  relief="flat", padx=10, pady=4,
+                  command=self._open_webapp).pack(side="left", padx=(6, 0))
+
+        tk.Label(bar, text="채널", font=FONT, bg="#F4F5F7").pack(side="left", padx=(20, 2))
+        ch_values = ["전체"] + [n for n, _ in DASH_CHANNELS]
+        ttk.Combobox(bar, textvariable=self.channel_var, width=10, font=FONT,
+                     state="readonly", values=ch_values).pack(side="left", padx=4)
+        self.channel_var.trace_add("write", lambda *a: self._render())
+        ent = tk.Entry(bar, textvariable=self.search_var, font=FONT, width=16)
+        ent.pack(side="left", padx=4)
+        ent.bind("<Return>", lambda e: self._render())
+
+    def _build_table(self):
+        frame = tk.Frame(self, bg="white")
+        frame.pack(fill="both", expand=True, padx=16, pady=8)
+        self.tree = ttk.Treeview(frame, columns=[c[0] for c in COLS],
+                                 show="headings", selectmode="extended")
+        for key, label, width in COLS:
+            self.tree.heading(key, text=label)
+            anchor = "w" if key in ("message", "treatment", "name") else "center"
+            self.tree.column(key, width=width, anchor=anchor, stretch=(key == "message"))
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        for name, color in DASH_CHANNELS:
+            self.tree.tag_configure(f"ch_{name}", foreground=color)
+        self.tree.bind("<Double-1>", self.on_row_double)
+
+    def _build_statusbar(self):
+        self.status = tk.Label(self, text="", font=("맑은 고딕", 9),
+                               bg="#F4F5F7", fg="#666", anchor="w")
+        self.status.pack(fill="x", padx=16, pady=(0, 8))
+
+    # ── 필터(로드된 대시보드 상세에 대해, 클라이언트단) ───────
+    def _visible_items(self) -> List[list]:
+        items = self.dash.get("items", [])
+        cname = self.channel_var.get()
+        if cname != "전체":
+            items = [r for r in items if r[0] == cname]
+        q = self.search_var.get().strip()
+        if q:
+            items = [r for r in items if any(q in (c or "") for c in r)]
+        return items
+
+    # ── 대시보드(구글시트) 읽기 → 화면 갱신 ───────────────────
+    def refresh_dashboard(self):
+        """'대시보드' 탭을 백그라운드로 읽어와 카드·목록을 채운다(네트워크→스레드)."""
+        if self._dash_job:
+            self.after_cancel(self._dash_job)
+            self._dash_job = None
+        if self._loading:
+            return
+        self._loading = True
+        self.status.config(text="대시보드 불러오는 중…")
+        threading.Thread(target=self._dashboard_worker, daemon=True).start()
+
+    def _dashboard_worker(self):
+        data = read_dashboard_data()
+        self.after(0, lambda: self._apply_dashboard(data))
+
+    def _apply_dashboard(self, data: dict):
+        self._loading = False
+        if data["ok"]:
+            self.dash = data
+        else:
+            self.status.config(text=f"대시보드 읽기 오류: {data['error'][:60]}")
+        self._render()
+        self._dash_job = self.after(GUI_REFRESH_SEC * 1000, self.refresh_dashboard)
+
+    def on_row_double(self, _event):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")   # (채널,이름,내용,시각,연락처)
+        if vals:
+            self._show_detail(vals)
+
+    def _show_detail(self, vals):
+        channel, name, message, tm, contact = (list(vals) + [""] * 5)[:5]
+        win = tk.Toplevel(self)
+        win.title("상담 상세")
+        win.geometry("440x320")
+        win.configure(bg="white")
+        tk.Label(win, text=channel, font=FONT_TITLE, bg="white",
+                 fg=DASH_COLOR.get(channel, "#333")).pack(anchor="w", padx=16, pady=(14, 4))
+        for k, v in [("이름", name), ("연락처", contact), ("시각", tm)]:
+            line = tk.Frame(win, bg="white")
+            line.pack(fill="x", padx=16, pady=2)
+            tk.Label(line, text=k, width=8, anchor="w", font=FONT_BOLD,
+                     bg="white", fg="#666").pack(side="left")
+            tk.Label(line, text=v, anchor="w", font=FONT, bg="white").pack(side="left")
+        tk.Label(win, text="내용", font=FONT_BOLD, bg="white",
+                 fg="#666").pack(anchor="w", padx=16, pady=(10, 2))
+        txt = tk.Text(win, height=5, font=FONT, wrap="word")
+        txt.insert("1.0", message)
+        txt.config(state="disabled")
+        txt.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+
+    def open_login_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("채널 로그인")
+        win.geometry("340x300")
+        win.configure(bg="white")
+        tk.Label(win, text="채널별 1회 로그인", font=FONT_TITLE,
+                 bg="white").pack(anchor="w", padx=16, pady=(14, 2))
+        tk.Label(win, text="버튼을 누르면 브라우저가 열립니다.\n로그인 후 그 창을 닫으세요.",
+                 font=FONT, bg="white", fg="#666", justify="left").pack(anchor="w", padx=16)
+        for ch in build_enabled_channels():
+            row = tk.Frame(win, bg="white")
+            row.pack(fill="x", padx=16, pady=3)
+            tk.Label(row, text=ch.name, width=12, anchor="w", font=FONT,
+                     bg="white").pack(side="left")
+            tk.Button(row, text="로그인", font=FONT, relief="flat", bg="#E9ECEF",
+                      command=lambda c=ch: self._do_login(c)).pack(side="right")
+
+    def _do_login(self, ch: BaseChannel):
+        if DEMO_MODE:
+            messagebox.showinfo("안내", "DEMO_MODE 입니다. 실제 로그인은 DEMO_MODE=False 에서.")
+            return
+        if not ch.LOGIN_URL:
+            messagebox.showwarning("안내", f"{ch.name} 의 LOGIN_URL 이 비어있습니다(코드에 입력 필요).")
+            return
+        try:
+            driver = make_driver(ch.key, headless=False)
+            driver.get(ch.LOGIN_URL)
+            messagebox.showinfo("로그인", f"{ch.name} 로그인 후 [확인]을 누르세요.")
+            driver.quit()
+        except Exception as e:
+            messagebox.showerror("오류", f"{ch.name} 로그인 창 오류:\n{e}")
+
+    # ── 화면 렌더(로드된 self.dash 로) ────────────────────────
+    def _render(self):
+        # 카드: 채널별 미확인 건수(+잔액 비고)
+        counts = {c["name"]: c for c in self.dash.get("channels", [])}
+        total = 0
+        failed = []                               # 이번 사이클 수집 실패한 채널명
+        for name, w in self.card_widgets.items():
+            c = counts.get(name)
+            raw = str((c or {}).get("count", "")).strip()
+            # 숫자가 아니면 그 문자열이 곧 실패 사유('로그인 실패' 등)
+            if raw and not raw.isdigit():
+                w["count"].config(text="!", fg="#F08C00")
+                w["badge"].config(text=f"⚠ {raw}", fg="#F08C00")
+                failed.append(f"{name}({raw})")
+                self._fail_detail[name] = (c or {}).get("note", "")
+                continue
+            self._fail_detail.pop(name, None)
+            n = int(raw) if str(raw).isdigit() else 0
+            total += n
+            w["count"].config(text=str(n), fg="#111")
+            w["badge"].config(text=f"🔴 미확인 {n}" if n else "", fg="#E03131")
+
+        # 상단 미확인 합계 — 실패 채널은 0으로 묻히므로 반드시 함께 표기
+        fail_txt = f"  ⚠ 수집실패 {len(failed)}건({', '.join(failed)})" if failed else ""
+        if total:
+            self.alert.config(text=f"🔴 미확인 상담 {total}건{fail_txt}", fg="#E03131")
+        elif failed:
+            self.alert.config(text=f"⚠ 미확인 0건 ·{fail_txt.strip()}", fg="#F08C00")
+        else:
+            self.alert.config(text="✅ 미확인 없음", fg="#2F9E44")
+
+        # 상세 목록
+        items = self._visible_items()
+        self.tree.delete(*self.tree.get_children())
+        for i, r in enumerate(items):
+            channel = r[0] if r else ""
+            self.tree.insert("", "end", iid=str(i), tags=[f"ch_{channel}"],
+                             values=(r[0], r[1], r[2], r[3], r[4]))
+
+        updated = self.dash.get("updated", "")
+        self.status.config(
+            text=f"대시보드 {len(items)}건 · 시트 업데이트: {updated} · "
+                 f"화면 새로고침 {datetime.now():%H:%M:%S}")
+
+    # ── 수집기(run_dashboard.py) 백그라운드 실행 제어 ──────────
+    def _collector_running(self) -> bool:
+        p = self.collector_proc
+        return bool(p and p.poll() is None)
+
+    def _boot_collector(self):
+        """시작 시 자동수집이 켜져 있으면 수집기 실행."""
+        if self.auto_var.get():
+            self._start_collector()
+        else:
+            self._update_collector_label()
+
+    def _toggle_collector(self):
+        if self._collector_running():
+            self.auto_var.set(False)
+            self._stop_collector()
+        else:
+            self.auto_var.set(True)
+            self._start_collector()
+
+    def _start_collector(self):
+        if self._collector_running():
+            return
+        # 이 GUI 가 띄운 게 아닌 수집기(옛 exe·다른 창)가 이미 돌고 있으면 막는다.
+        # 두 수집기가 같은 브라우저/시트를 다투면 정상 결과가 '실패'로 덮어써진다.
+        if collector_lock_held():
+            self.auto_var.set(False)
+            self._update_collector_label()
+            messagebox.showwarning(
+                "수집기 중복 실행",
+                "이미 다른 수집기가 실행 중입니다.\n\n"
+                "다른 창이나 예전 버전 exe 가 떠 있는지 확인하세요.\n"
+                "(작업 관리자에서 CounselTotal.exe / CStotal.exe / python.exe 확인)")
+            return
+        # 다른 PC가 잠금을 쥔 경우 — 수집기가 조용히 죽는 대신 여기서 이유를 알린다
+        blocker = sheet_lock_blocker()
+        if blocker:
+            self.auto_var.set(False)
+            self._update_collector_label()
+            messagebox.showwarning(
+                "다른 PC에서 실행 중",
+                f"다른 PC의 수집기가 구글시트 잠금을 쥐고 있습니다.\n\n{blocker}\n\n"
+                "그쪽을 종료하거나, 하트비트가 끊길 때까지"
+                f" 최대 {SHEET_LOCK_STALE_SEC // 60}분 기다리세요.")
+            return
+        # 두 모드 모두 --collector 진입점으로 통일 → collector.log 에 기록됨
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--collector"]      # exe 자기 자신을 수집기로
+        else:
+            cmd = [sys.executable, str(BASE_DIR / "total.py"), "--collector"]
+        try:
+            # CREATE_NO_WINDOW(0x08000000): 별도 콘솔창 안 뜨게
+            self.collector_proc = subprocess.Popen(
+                cmd, cwd=str(BASE_DIR), creationflags=0x08000000)
+            self.status.config(text=f"수집기 시작 · 2분마다 순회 · {datetime.now():%H:%M:%S}")
+        except Exception as e:
+            self.collector_proc = None
+            self.auto_var.set(False)
+            messagebox.showerror("수집기 오류", f"수집기 실행 실패:\n{e}")
+        self._update_collector_label()
+
+    def _stop_collector(self):
+        p = self.collector_proc
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        self.collector_proc = None
+        # terminate() 는 자식의 finally 를 건너뛰므로 GUI 가 대신 잠금을 반납한다
+        # (안 하면 다른 PC 가 하트비트 만료까지 최대 7분을 기다린다)
+        threading.Thread(target=release_sheet_lock, daemon=True).start()
+        self._update_collector_label()
+
+    def _show_fail_detail(self):
+        """상단 경고 클릭 → 채널별 실패 사유 원문(시트 '비고' 열)을 보여준다."""
+        if not self._fail_detail:
+            messagebox.showinfo("수집 실패 없음", "현재 실패한 채널이 없습니다.")
+            return
+        body = "\n\n".join(f"● {name}\n{detail or '(원문 없음)'}"
+                           for name, detail in self._fail_detail.items())
+        messagebox.showwarning(
+            "수집 실패 사유",
+            f"{body}\n\n자세한 내용은 '📄 로그' 버튼의 collector.log 를 확인하세요.")
+
+    def _open_log(self):
+        """수집기 로그를 기본 텍스트 편집기로 연다(실패 원인 확인용)."""
+        path = BASE_DIR / "collector.log"
+        if not path.exists():
+            messagebox.showinfo("로그 없음",
+                                "아직 로그가 없습니다.\n수집기를 한 번 켜면 생성됩니다.\n\n"
+                                f"경로: {path}")
+            return
+        try:
+            os.startfile(str(path))
+        except Exception as e:
+            messagebox.showerror("로그 열기 실패", f"{path}\n\n{e}")
+
+    def _open_webapp(self):
+        """웹 대시보드(Apps Script 웹앱)를 기본 브라우저로 연다."""
+        import webbrowser
+        try:
+            webbrowser.open(WEBAPP_URL)
+        except Exception as e:
+            messagebox.showerror("웹 대시보드 열기 실패", f"{WEBAPP_URL}\n\n{e}")
+
+    def _poll_collector(self):
+        """수집기 생존 여부를 3초마다 확인해 라벨/체크박스에 반영."""
+        # 자동수집 켜짐인데 프로세스가 죽었으면(크래시) 체크 해제
+        if self.auto_var.get() and not self._collector_running():
+            self.auto_var.set(False)
+            self.collector_proc = None
+        self._update_collector_label()
+        self.after(3000, self._poll_collector)
+
+    def _update_collector_label(self):
+        if self._collector_running():
+            self.collector_btn.config(text="⏸ 수집기 끄기", bg="#FFE3E3", fg="#C92A2A")
+            self.collector_state.config(text="● 실행 중 · 2분 순회", fg="#2F9E44")
+        else:
+            self.collector_btn.config(text="▶ 수집기 켜기", bg="#D3F9D8", fg="#2B8A3E")
+            self.collector_state.config(text="■ 중지됨", fg="#868E96")
+
+    def _on_close(self):
+        self._stop_collector()
+        self.destroy()
+
+
+def _pid_alive(pid: int) -> bool:
+    """윈도우에서 해당 PID 가 살아있는지."""
+    import ctypes
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    k = ctypes.windll.kernel32
+    h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+        return bool(ok) and code.value == STILL_ACTIVE
+    finally:
+        k.CloseHandle(h)
+
+
+def _watch_parent(interval: float = 5.0) -> None:
+    """부모(GUI)가 사라지면 수집기도 즉시 종료한다.
+    GUI 를 작업관리자로 강제 종료해도 수집기가 고아로 남아 시트 잠금을 계속
+    쥐고 있던 문제를 막는다(콘솔이 없어 눈에도 안 띈다)."""
+    try:
+        ppid = os.getppid()
+    except Exception:
+        return
+    if not ppid or not _pid_alive(ppid):
+        return                              # 단독 실행(부모 없음) → 감시 안 함
+
+    def loop():
+        while True:
+            time.sleep(interval)
+            if not _pid_alive(ppid):
+                print(f"[종료] GUI(PID {ppid})가 종료되어 수집기도 함께 종료합니다.")
+                sys.stdout.flush()
+                release_sheet_lock()        # 다른 PC 가 7분 기다리지 않도록 반납
+                os._exit(0)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def _run_collector() -> None:
+    """수집기 루프. 콘솔이 없어도(--noconsole/CREATE_NO_WINDOW) 원인을 남기도록
+    stdout/stderr 을 exe 옆 collector.log 로 돌린다."""
+    import run_dashboard
+
+    log_path = BASE_DIR / "collector.log"
+    try:
+        if log_path.exists() and log_path.stat().st_size > 5_000_000:   # 5MB 넘으면 1회 롤오버
+            log_path.replace(log_path.with_suffix(".log.1"))
+        f = open(log_path, "a", encoding="utf-8", buffering=1)
+    except Exception:
+        f = None
+
+    if f is None:                       # 로그조차 못 열면 그냥 실행
+        run_dashboard.main()
+        return
+
+    sys.stdout = sys.stderr = f
+    print(f"\n===== 수집기 시작 {_now_stamp()} =====")
+    _watch_parent()                 # GUI 가 죽으면 수집기도 함께 종료
+
+    # 중복 실행 차단 — 두 수집기가 같은 브라우저/시트를 두고 다투면
+    # 한쪽이 성공한 결과를 다른 쪽이 '실패'로 덮어쓴다.
+    lock = acquire_collector_lock()
+    if lock is None:
+        print(f"[중단] 이미 다른 수집기가 실행 중입니다"
+              f"(포트 {COLLECTOR_LOCK_PORT} 점유). 이 프로세스는 종료합니다.")
+        f.flush()
+        return
+
+    try:
+        run_dashboard.main()
+    except BaseException:
+        import traceback
+        traceback.print_exc()           # 크래시 원인도 로그에 남김
+        raise
+    finally:
+        print(f"===== 수집기 종료 {_now_stamp()} =====")
+        f.flush()
+        try:
+            lock.close()        # 다음 실행이 바로 잠금을 잡을 수 있게
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    # exe 한 개가 두 역할: 인자 없으면 GUI, --collector 면 수집기 루프
+    if "--collector" in sys.argv[1:]:
+        _run_collector()
+    else:
+        App().mainloop()
