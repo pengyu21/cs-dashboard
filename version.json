@@ -1,10 +1,10 @@
 {
-  "version": "1.0.2",
-  "notes": "개발 실행 시 버전 표시",
+  "version": "1.0.3",
+  "notes": "이름 칸 확대 · 내용 칸 축소",
   "files": [
     {
       "name": "total.py",
-      "sha256": "c75ebe20762582f1aa14136cdd07c354f0f6b5759c742954a0042301eae32752"
+      "sha256": "7253ee573bd37ecf43d43b7a0a6cd2ec1e3f80e5577981cafbada1813c951bf8"
     },
     {
       "name": "run_dashboard.py",
