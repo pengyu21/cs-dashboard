@@ -1,10 +1,10 @@
 {
-  "version": "1.0.3",
-  "notes": "이름 칸 확대 · 내용 칸 축소",
+  "version": "1.0.4",
+  "notes": "바비톡 자동 로그인 버튼 클릭 안정화",
   "files": [
     {
       "name": "total.py",
-      "sha256": "7253ee573bd37ecf43d43b7a0a6cd2ec1e3f80e5577981cafbada1813c951bf8"
+      "sha256": "2a1aec0aaa76d2159b7a5876f6a98b02b5b67231e12387a02afff0250063ae10"
     },
     {
       "name": "run_dashboard.py",

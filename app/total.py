@@ -502,8 +502,10 @@ class BrowserHub:
                     # 실패(캡챠/입력오류 등) → 백오프(반복 로그인 시도 차단) + 안내
                     self._backoff[ch.key] = time.monotonic() + self.LOGIN_BACKOFF_SEC
                     hint = f" | 수동 로그인: {ch.LOGIN_HELP}" if ch.LOGIN_HELP else ""
+                    why = getattr(ch, "login_error", "") or ""
                     raise RuntimeError(
-                        f"자동 로그인 실패 — {int(self.LOGIN_BACKOFF_SEC/60)}분간 건너뜀{hint}")
+                        f"자동 로그인 실패 — {int(self.LOGIN_BACKOFF_SEC/60)}분간 건너뜀"
+                        + (f" ({why})" if why else "") + hint)
                 self.driver.get(ch.LIST_URL)
                 self._accept_alert(2.0)
                 ch.dismiss_popups(self.driver)
@@ -554,6 +556,7 @@ class BaseChannel(ABC):
     LOGIN_URL: str = ""     # 로그인 페이지
     LIST_URL: str = ""      # 상담 목록 페이지
     LOGIN_HELP: str = ""    # 로그인 실패 시 안내 문구(수동 로그인 방법 등)
+    login_error: str = ""   # 마지막 자동 로그인 실패 사유(화면·시트 '비고'에 표시)
 
     # ── 팝업 닫기 ─────────────────────────────────────────────
     # ⚠️ 페이지 본문은 절대 클릭하지 않는다. '진짜 오버레이(모달/알림/드로어)'가
@@ -582,6 +585,7 @@ class BaseChannel(ABC):
         self.credentials = credentials or {}
         # 시트 1행에 추가로 쓸 셀(예: 잔액) {"E1": "...", "F1": "..."}. scrape 중 채움.
         self.header_cells: Dict[str, str] = {}
+        self.login_error = ""       # 자동 로그인 실패 사유(어디서 막혔는지 남긴다)
 
     # 외부 진입점: 데모면 가짜, 아니면 셀레니움 수집
     def collect(self) -> List[Consultation]:
@@ -720,11 +724,38 @@ class BabitalkChannel(BaseChannel):
         return ("/login" not in driver.current_url
                 and not driver.find_elements(By.CSS_SELECTOR, "input[placeholder='ID']"))
 
+    # 로그인 폼 요소 셀렉터 — 클래스명이 바뀌어도 버티게 위에서부터 여러 개 시도
+    ID_SELECTORS = ("input.form-control[placeholder='ID']",
+                    "input[placeholder='ID']",
+                    "input[name='id']", "input[name='userId']",
+                    "input[name='username']",
+                    "form input[type='text']")
+    PW_SELECTORS = ("input.form-control[type='password']",
+                    "input[type='password']")
+    LOGIN_SUBMIT_RETRY = 3      # '로그인' 클릭이 씹혀 폼이 남을 때 재클릭 횟수
+    LOGIN_WAIT_SEC = 15         # 클릭 후 로그인 완료(로그인 화면 이탈)까지 대기(초)
+
+    @staticmethod
+    def _first_visible(driver, selectors):
+        """selectors 중 화면에 보이는 첫 요소를 반환. 없으면 None."""
+        from selenium.webdriver.common.by import By
+        for sel in selectors:
+            try:
+                for e in driver.find_elements(By.CSS_SELECTOR, sel):
+                    if e.is_displayed():
+                        return e
+            except Exception:
+                continue
+        return None
+
     @staticmethod
     def _react_fill(driver, el, value):
         """React 컨트롤드 인풋에 값 주입(send_keys가 값 등록 안 되는 폼 대응).
         네이티브 value setter로 값 설정 + input/change 이벤트 발생 → React 상태 반영."""
-        el.click()
+        try:
+            el.click()
+        except Exception:
+            pass
         driver.execute_script(
             "var d=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');"
             "d.set.call(arguments[0], arguments[1]);"
@@ -732,33 +763,203 @@ class BabitalkChannel(BaseChannel):
             "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));",
             el, value)
 
-    def login(self, driver) -> bool:
+    @staticmethod
+    def _pop_alert(driver) -> str:
+        """열려 있는 JS alert('세션이 만료되었습니다' 등)을 닫고 그 문구를 반환.
+        없으면 ''. (닫지 않으면 이후 모든 셀레니움 명령이 막힌다)"""
+        try:
+            al = driver.switch_to.alert
+            msg = (al.text or "").strip()
+            al.accept()
+            time.sleep(0.3)
+            return msg or "알림창"
+        except Exception:
+            return ""
+
+    def _fill_login_form(self, driver) -> bool:
+        """아이디/비번을 '값이 실제로 들어간 상태'로 만든다. 실패 시 False.
+        React 폼이라 값 주입 후 value 를 다시 읽어 확인하고, 반영이 안 됐으면
+        실제 키 입력(send_keys)으로 폴백한다(키 이벤트는 React가 반드시 받는다)."""
+        id_in = self._first_visible(driver, self.ID_SELECTORS)
+        pw = self._first_visible(driver, self.PW_SELECTORS)
+        if id_in is None or pw is None:
+            self.login_error = "로그인 폼(아이디/비번 칸)을 찾지 못했습니다"
+            return False
+        for el, val in ((id_in, self.USER_ID), (pw, self.USER_PW)):
+            self._react_fill(driver, el, val)
+            time.sleep(0.4)
+            if (el.get_attribute("value") or "") != val:
+                try:
+                    el.clear()
+                    el.send_keys(val)
+                except Exception:
+                    pass
+            time.sleep(0.3)
+        if not ((id_in.get_attribute("value") or "")
+                and (pw.get_attribute("value") or "")):
+            self.login_error = "아이디/비번 입력이 폼에 반영되지 않았습니다"
+            return False
+        return True
+
+    def _retype_with_keys(self, driver) -> None:
+        """아이디/비번을 실제 키 입력으로 다시 친다.
+        keyup 등 '키 이벤트'로만 폼 검증을 하는 화면에서 제출 버튼이
+        계속 비활성으로 남는 것을 푼다(값 주입만으론 안 풀린다)."""
+        for sels, val in ((self.ID_SELECTORS, self.USER_ID),
+                          (self.PW_SELECTORS, self.USER_PW)):
+            el = self._first_visible(driver, sels)
+            if el is None:
+                continue
+            try:
+                el.click()
+                el.clear()
+                el.send_keys(val)
+                time.sleep(0.3)
+            except Exception:
+                pass
+
+    def _login_button(self, driver):
+        """화면에 보이는 '로그인' 제출 버튼. 없으면 None."""
         from selenium.webdriver.common.by import By
-        from selenium.webdriver.support import expected_conditions as EC
+        for by, sel in (
+                (By.XPATH, "//button[@type='submit'][contains(.,'로그인')]"),
+                (By.XPATH, "//button[@type='submit']"),
+                (By.XPATH, "//button[contains(normalize-space(.),'로그인')]"),
+                (By.CSS_SELECTOR, "input[type='submit']"),
+                (By.XPATH, "//*[@role='button'][contains(normalize-space(.),'로그인')]")):
+            try:
+                for e in driver.find_elements(by, sel):
+                    if e.is_displayed():
+                        return e
+            except Exception:
+                continue
+        return None
+
+    def _submit_login(self, driver) -> bool:
+        """'로그인' 버튼을 실제로 누른다(눌렀으면 True).
+
+        ⚠️ 여기가 '로그인 대기'로 빠지던 지점이다. 예전 코드는 버튼을 한 가지
+           XPath 로만 찾아 그냥 click() 했다. 그래서
+             · 버튼을 못 찾으면 → 예외로 login() 이 그대로 끝남
+             · disabled(폼 상태 미반영) 버튼이면 → click() 이 조용히 아무 일도 안 함
+           둘 다 '아이디·비번만 채워진 화면'을 남기고 백오프('로그인 대기')로 갔다.
+           → 활성화 대기 + 클릭 폴백(JS 클릭 → Enter → form submit)으로 보강."""
+        from selenium.webdriver.common.keys import Keys
+
+        btn = self._login_button(driver)
+        for _ in range(10):                 # 비활성 버튼은 활성화될 때까지 최대 5초 대기
+            if btn is None or btn.is_enabled():
+                break
+            time.sleep(0.5)
+            btn = self._login_button(driver)
+
+        # 여전히 비활성 → 값 주입만으론 폼 검증이 안 걸린 것(키 이벤트로 검증하는 폼).
+        # 실제 키 입력으로 다시 쳐서 활성화를 유도한다.
+        if btn is not None and not btn.is_enabled():
+            self._retype_with_keys(driver)
+            for _ in range(6):
+                btn = self._login_button(driver)
+                if btn is None or btn.is_enabled():
+                    break
+                time.sleep(0.5)
+
+        if btn is not None and btn.is_enabled():
+            try:
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});", btn)
+            except Exception:
+                pass
+            for click in (lambda: btn.click(),
+                          lambda: driver.execute_script("arguments[0].click();", btn)):
+                try:
+                    click()
+                    return True
+                except Exception:
+                    continue
+
+        # 버튼이 없거나 비활성/클릭 불가 → 비번칸 Enter → 폼 직접 제출
+        pw = self._first_visible(driver, self.PW_SELECTORS)
+        if pw is not None:
+            try:
+                pw.send_keys(Keys.ENTER)
+                return True
+            except Exception:
+                pass
+            try:
+                driver.execute_script(
+                    "var f=arguments[0].form;"
+                    "if(f){f.requestSubmit?f.requestSubmit():f.submit();}", pw)
+                return True
+            except Exception:
+                pass
+        self.login_error = ("로그인 버튼이 계속 비활성 상태입니다" if btn is not None
+                            else "로그인 버튼을 찾지 못했습니다")
+        return False
+
+    def _login_error_text(self, driver) -> str:
+        """폼에 떠 있는 오류 문구(비번 불일치 등). 없으면 ''.
+        오류가 있는데 계속 누르면 계정이 잠기므로 재시도를 멈추는 근거로 쓴다."""
+        from selenium.webdriver.common.by import By
+        for sel in (".MuiFormHelperText-root.Mui-error", ".Mui-error",
+                    ".invalid-feedback", ".error-message",
+                    "[class*='Toastify__toast-body']"):
+            try:
+                for e in driver.find_elements(By.CSS_SELECTOR, sel):
+                    if e.is_displayed() and (e.text or "").strip():
+                        return e.text.strip()[:80]
+            except Exception:
+                continue
+        return ""
+
+    def login(self, driver) -> bool:
+        """저장된 계정으로 자동 로그인(세션 만료 시 Hub 가 호출).
+        입력 반영 확인 → 버튼 활성화 대기 → 클릭(폴백 포함) → 결과 확인,
+        로그인 화면이 그대로 남으면 재클릭까지 한다."""
         from selenium.webdriver.support.ui import WebDriverWait
 
+        self.login_error = ""
         driver.get(self.LOGIN_URL)
-        wait = WebDriverWait(driver, 20)
+        self._pop_alert(driver)             # '세션 만료' 등 알림창 먼저 닫기
+        try:                                # 로그인 폼이 그려질 때까지 대기
+            WebDriverWait(driver, 20).until(
+                lambda d: self._first_visible(d, self.PW_SELECTORS) is not None
+                or "/login" not in d.current_url)
+        except Exception:
+            pass
+        if ("/login" not in driver.current_url
+                and self._first_visible(driver, self.PW_SELECTORS) is None):
+            return True                     # 이미 로그인됨(로그인 페이지가 튕겨냄)
 
-        id_input = wait.until(EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "input.form-control[placeholder='ID']")))
-        self._react_fill(driver, id_input, self.USER_ID)
-        time.sleep(1)
-        pw = driver.find_element(
-            By.CSS_SELECTOR, "input.form-control[type='password']")
-        self._react_fill(driver, pw, self.USER_PW)
-        time.sleep(0.5)
-        # 값이 실제로 들어갔는지 확인(안 들어가면 send_keys 폴백)
-        if not (id_input.get_attribute("value") and pw.get_attribute("value")):
-            id_input.clear(); id_input.send_keys(self.USER_ID)
-            pw.clear(); pw.send_keys(self.USER_PW)
-        time.sleep(0.5)
+        for i in range(1, self.LOGIN_SUBMIT_RETRY + 1):
+            if not self._fill_login_form(driver):
+                print(f"[{self.name}] 로그인 입력 실패 — {self.login_error}")
+                return False
+            if not self._submit_login(driver):
+                print(f"[{self.name}] 로그인 클릭 실패 — {self.login_error}")
+                return False
+            print(f"[{self.name}] '로그인' 클릭 {i}/{self.LOGIN_SUBMIT_RETRY} — 결과 대기")
+            try:
+                WebDriverWait(driver, self.LOGIN_WAIT_SEC).until(
+                    lambda d: "/login" not in d.current_url)
+            except Exception:
+                pass
+            msg = self._pop_alert(driver)   # 클릭 후 뜨는 알림창(로그인 실패 안내 등)
+            if msg:
+                self.login_error = msg
+                print(f"[{self.name}] 로그인 알림창: {msg}")
+            if "/login" not in driver.current_url:
+                print(f"[{self.name}] 자동 로그인 성공")
+                return True
+            err = self._login_error_text(driver)
+            if err:                         # 비번 오류 등 — 더 눌러도 잠기기만 한다
+                self.login_error = err
+                print(f"[{self.name}] 로그인 거부: {err}")
+                return False
+            time.sleep(2)                   # 클릭이 씹힌 경우 → 재클릭
 
-        btn = driver.find_element(
-            By.XPATH, "//button[@type='submit'][contains(.,'로그인')]")
-        btn.click()
-        wait.until(lambda d: "/login" not in d.current_url)
-        return "/login" not in driver.current_url
+        self.login_error = (self.login_error
+                            or "로그인 화면을 넘어가지 못했습니다(클릭 후에도 잔류)")
+        return False
 
     @staticmethod
     def _memo_text(driver, td) -> str:
