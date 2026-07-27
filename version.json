@@ -1,10 +1,10 @@
 {
-  "version": "1.0.1",
-  "notes": "카카오 로그인 재시도 + 버전 표시",
+  "version": "1.0.2",
+  "notes": "개발 실행 시 버전 표시",
   "files": [
     {
       "name": "total.py",
-      "sha256": "096584e5b60e25cd7c126b3465da14c1f7631c3f3def20e303d7c1530a79742b"
+      "sha256": "c75ebe20762582f1aa14136cdd07c354f0f6b5759c742954a0042301eae32752"
     },
     {
       "name": "run_dashboard.py",

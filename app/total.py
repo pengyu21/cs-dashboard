@@ -77,14 +77,29 @@ SECRETS: Dict = _load_secrets()
 
 
 def app_version() -> str:
-    """런처가 깃허브에서 받아둔 코드 버전(app/version.json). 없으면 '개발'."""
-    for p in (BASE_DIR / "app" / "version.json", BASE_DIR / "version.json"):
+    """실행 중인 코드의 버전.
+
+    찾는 순서:
+      ① app/version.json   — exe(런처)가 깃허브에서 받아둔 코드      → "1.0.1"
+      ② version.json       — app/ 안에서 바로 실행된 경우
+      ③ repo/version.json  — 개발 폴더에서 소스를 직접 실행한 경우   → "1.0.1(개발)"
+    아무것도 없으면 "개발".
+    """
+    def read(p: Path) -> str:
         try:
             if p.exists():
                 return json.loads(p.read_text(encoding="utf-8")).get("version", "")
         except Exception:
             pass
-    return "개발"
+        return ""
+
+    for p in (BASE_DIR / "app" / "version.json", BASE_DIR / "version.json"):
+        v = read(p)
+        if v:
+            return v
+    # 개발 PC 에서 total.py 를 직접 돌릴 때: 마지막으로 배포한 버전을 보여준다
+    v = read(BASE_DIR / "repo" / "version.json")
+    return f"{v}(개발)" if v else "개발"
 
 
 def account(key: str) -> tuple:
@@ -2645,7 +2660,7 @@ class App(tk.Tk):
         tk.Label(h, text="🏥 상담 통합 대시보드", font=FONT_TITLE,
                  bg="#F4F5F7", fg="#222").pack(side="left")
         tk.Label(h, text=f"v{app_version()}", font=("맑은 고딕", 9),
-                 bg="#F4F5F7", fg="#ADB5BD").pack(side="left", padx=(8, 0), pady=(8, 0))
+                 bg="#F4F5F7", fg="#868E96").pack(side="left", padx=(8, 0), pady=(8, 0))
         self.alert = tk.Label(h, text="", font=FONT_BOLD, bg="#F4F5F7", padx=12,
                               cursor="hand2")
         self.alert.pack(side="right")
