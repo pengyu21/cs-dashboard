@@ -1,10 +1,10 @@
 {
-  "version": "1.0.6",
-  "notes": "자동 로그인 클릭 강화(전 채널) + 배포 해시 줄바꿈 수정",
+  "version": "1.0.7",
+  "notes": "웹 대시보드에 실행 중인 버전 표시(시트 H3)",
   "files": [
     {
       "name": "total.py",
-      "sha256": "4a11fb00bdf2650d82eff105c0e4d48d78a68a853e456adf996b42e1e5bb5e76"
+      "sha256": "f197b24d6164590f77e8af941a166504d2c0a5a2e5a32c096f7b31921c3c77bd"
     },
     {
       "name": "run_dashboard.py",

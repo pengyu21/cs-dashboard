@@ -2291,6 +2291,10 @@ DASHBOARD_TAB = "대시보드2"
 _LAST_WRITTEN_STAMP = ""        # write_dashboard 가 마지막으로 쓴 D1 값(외부 writer 탐지용)
 SHEET_LOCK_OWNER_CELL = "H1"
 SHEET_LOCK_BEAT_CELL = "H2"
+# H3 = 지금 수집 중인 코드의 버전. 하트비트와 함께 갱신하므로 '실제로 돌고 있는
+# 버전'이 그대로 남는다 → 웹앱(Index.html)이 이 값을 읽어 화면에 표시한다.
+# (PC 마다 업데이트가 늦게 반영될 수 있어, 화면에서 바로 확인할 수단이 필요하다)
+SHEET_LOCK_VER_CELL = "H3"
 # 하트비트가 이보다 오래되면 그 PC 는 죽은 것으로 보고 잠금을 인계한다.
 # 하트비트를 수집 사이클과 분리해 HEARTBEAT_SEC(45초)마다 독립적으로 찍으므로,
 # 살아있는 수집기는 이 안에 반드시 여러 번 갱신한다 → 짧게 잡아도 오인 종료 없음.
@@ -2336,9 +2340,12 @@ def _read_lock(ws) -> tuple:
 
 
 def _write_lock(ws, owner: str) -> None:
+    """H1 소유자 · H2 하트비트 · H3 실행 중인 버전을 한 번에 기록.
+    (버전을 같이 남겨야 웹앱에서 '이 PC 가 어떤 버전으로 돌고 있는지' 보인다)"""
     _sheet_call(ws.update,
-                values=[[owner], [f"{datetime.now():%Y-%m-%d %H:%M:%S}"]],
-                range_name=f"{SHEET_LOCK_OWNER_CELL}:{SHEET_LOCK_BEAT_CELL}",
+                values=[[owner], [f"{datetime.now():%Y-%m-%d %H:%M:%S}"],
+                        [app_version()]],
+                range_name=f"{SHEET_LOCK_OWNER_CELL}:{SHEET_LOCK_VER_CELL}",
                 value_input_option="RAW")
 
 
