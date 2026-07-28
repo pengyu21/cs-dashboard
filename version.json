@@ -1,10 +1,10 @@
 {
   "version": "1.0.5",
-  "notes": "강남언니·네이버지도·온라인상담·예약 자동 로그인 클릭 강화(공통화)",
+  "notes": "자동 로그인 클릭 강화 + 배포 해시(줄바꿈) 수정",
   "files": [
     {
       "name": "total.py",
-      "sha256": "d9804496a8f7fd7d7659d5423c3b34cd481b0314d49bae3b197d1f72b284b181"
+      "sha256": "4a11fb00bdf2650d82eff105c0e4d48d78a68a853e456adf996b42e1e5bb5e76"
     },
     {
       "name": "run_dashboard.py",
