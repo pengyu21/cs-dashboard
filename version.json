@@ -1,10 +1,10 @@
 {
-  "version": "1.0.10",
-  "notes": "수집 실패가 해소되면 정상화 알림 전송(복구 소요시간 표시)",
+  "version": "1.0.11",
+  "notes": "바비톡 세션만료 alert 로 재로그인이 막히던 문제 수정",
   "files": [
     {
       "name": "total.py",
-      "sha256": "f19f1d4485e01c75fa305e5dc23518c64122f680a12543eabb47597f74ffd154"
+      "sha256": "647931d67d142396508d45d4de6221b8698b485a0302fc4951005cdbab4a1bd2"
     },
     {
       "name": "run_dashboard.py",

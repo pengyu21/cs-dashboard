@@ -523,6 +523,18 @@ class BrowserHub:
             except Exception:
                 return
 
+    def _retry_on_alert(self, fn):
+        """alert 때문에 막힌 호출은 alert 을 닫고 한 번 더 시도한다.
+        세션 만료 안내는 페이지 로드가 끝난 '뒤에' 뜨기도 해서, 아무리 잘 닫아도
+        is_logged_in()/login() 도중에 새로 뜰 수 있다. 그때 채널을 통째로
+        실패시키지 않고 알림만 치우고 그대로 진행한다."""
+        from selenium.common.exceptions import UnexpectedAlertPresentException
+        try:
+            return fn()
+        except UnexpectedAlertPresentException:
+            self._accept_alert(1.0)
+            return fn()
+
     def _ensure_tab(self, ch: "BaseChannel") -> None:
         """채널 탭으로 전환. 없거나 닫혔으면 빈 창 재활용 또는 새 탭 생성."""
         h = self.tabs.get(ch.key)
@@ -555,9 +567,11 @@ class BrowserHub:
                 self._ensure_tab(ch)
 
             self.driver.get(ch.LIST_URL)           # 새로고침 대신 완전 재로드
-            self._accept_alert(2.0)                # 미로그인/세션만료 등 늦게 뜨는 alert까지 대기해서 닫음
+            # 미로그인/세션만료 등 늦게 뜨는 alert까지 대기해서 닫음.
+            # 채널이 더 긴 창을 요구하면(ALERT_SETTLE_SEC) 그만큼 기다린다.
+            self._accept_alert(max(2.0, getattr(ch, "ALERT_SETTLE_SEC", 0.0)))
             ch.dismiss_popups(self.driver)
-            if not ch.is_logged_in(self.driver):
+            if not self._retry_on_alert(lambda: ch.is_logged_in(self.driver)):
                 # 백오프 중이면 재로그인은 시도하지 않고 남은 시간만큼 건너뜀
                 # (수동 로그인은 위 is_logged_in 통과로 이미 걸러졌으니 여기 안 옴)
                 until = self._backoff.get(ch.key, 0.0)
@@ -567,9 +581,10 @@ class BrowserHub:
 
                 print(f"[{ch.name}] 세션 만료 → 재로그인")
                 try:
-                    ok = ch.login(self.driver)
-                except Exception:
+                    ok = self._retry_on_alert(lambda: ch.login(self.driver))
+                except Exception as e:
                     ok = False                     # 로그인 중 예외도 실패로 처리
+                    ch.login_error = ch.login_error or classify_error(e).detail
                 if not ok:
                     # 실패(캡챠/입력오류 등) → 백오프(반복 로그인 시도 차단) + 안내
                     self._backoff[ch.key] = time.monotonic() + self.LOGIN_BACKOFF_SEC
@@ -579,7 +594,7 @@ class BrowserHub:
                         f"자동 로그인 실패 — {int(self.LOGIN_BACKOFF_SEC/60)}분간 건너뜀"
                         + (f" ({why})" if why else "") + hint)
                 self.driver.get(ch.LIST_URL)
-                self._accept_alert(2.0)
+                self._accept_alert(max(2.0, getattr(ch, "ALERT_SETTLE_SEC", 0.0)))
                 ch.dismiss_popups(self.driver)
             self._backoff.pop(ch.key, None)        # 로그인 정상(수동 포함) → 백오프 해제
             return ch.scrape(self.driver)
@@ -749,18 +764,36 @@ class BaseChannel(ABC):
         el.clear()
         el.send_keys(value)
 
+    # 세션이 만료되면 alert 이 '페이지 로드가 끝난 뒤' 늦게 뜨는 사이트가 있다.
+    # (바비톡: /ask 로드 0.5초 → 0.8초에 '로그인 기한이 만료되었습니다' alert)
+    # 그 창이 열려 있는 동안은 셀레니움 명령이 전부 막히므로 채널별로 더 기다린다.
+    ALERT_SETTLE_SEC = 0.0
+
     @staticmethod
-    def _pop_alert(driver) -> str:
-        """열려 있는 JS alert('로그인 후 이용' 등)을 닫고 그 문구를 반환. 없으면 ''.
-        (닫지 않으면 이후 모든 셀레니움 명령이 막힌다)"""
-        try:
-            al = driver.switch_to.alert
-            msg = (al.text or "").strip()
-            al.accept()
-            time.sleep(0.3)
-            return msg or "알림창"
-        except Exception:
-            return ""
+    def _pop_alert(driver, wait: float = 0.0) -> str:
+        """열려 있는 JS alert 을 '전부' 닫고 첫 문구를 반환. 없으면 ''.
+        wait>0 이면 그동안 늦게 뜨는 alert 도 폴링해서 닫는다.
+
+        ⚠️ 닫지 않으면 이후 모든 셀레니움 명령이 UnexpectedAlertPresentException 으로
+           막힌다. 게다가 chromedriver 기본값이 'dismiss and notify' 라 그 다음 명령이
+           alert 을 '취소'로 닫아버린다 — 즉 우리가 확인을 누른 게 아니라 브라우저가
+           멋대로 취소한 셈이 되고, 예외까지 올라가 그 채널이 통째로 실패한다.
+        만료 안내는 XHR 이 401 날 때마다 뜨므로 연속으로 여러 개가 쌓일 수 있다."""
+        first = ""
+        end = time.monotonic() + max(0.0, wait)
+        while True:
+            try:
+                al = driver.switch_to.alert
+                msg = (al.text or "").strip()
+                al.accept()
+                first = first or (msg or "알림창")
+                time.sleep(0.25)
+                continue                    # 뒤에 쌓인 alert 이 또 있는지 계속 확인
+            except Exception:
+                pass                        # 지금은 없음 → 남은 시간만큼 더 지켜본다
+            if time.monotonic() >= end:
+                return first
+            time.sleep(0.2)
 
     def _at_login_page(self, driver) -> bool:
         """아직 로그인 화면인지(URL 표식 기준). 판별이 다른 채널은 override."""
@@ -906,8 +939,14 @@ class BaseChannel(ABC):
         from selenium.webdriver.support.ui import WebDriverWait
 
         self.login_error = ""
+        # ⚠️ 순서 주의 — alert 을 '이동보다 먼저' 치운다.
+        #    예전엔 _goto_login_page() 가 먼저였는데, 세션 만료 alert 이 떠 있으면
+        #    그 안의 driver.get() 이 UnexpectedAlertPresentException 으로 터져
+        #    login() 이 통째로 실패(=10분 백오프)했다. 정작 로그인 화면은 멀쩡한데
+        #    '자동 로그인 실패'로 넘어가던 원인.
+        self._pop_alert(driver)
         self._goto_login_page(driver)
-        self._pop_alert(driver)             # '로그인 후 이용' 등 알림창 먼저 닫기
+        self._pop_alert(driver, self.ALERT_SETTLE_SEC)   # 이동 뒤 늦게 뜨는 것까지
         try:                                # 로그인 폼이 그려질 때까지 대기
             WebDriverWait(driver, 20).until(
                 lambda d: self._first_visible(d, self.PW_SELECTORS) is not None
@@ -1078,6 +1117,10 @@ class BabitalkChannel(BaseChannel):
                     "form input[type='text']")
     PW_SELECTORS = ("input.form-control[type='password']",
                     "input[type='password']")
+    # 세션이 만료된 채 /ask 를 열면 로드가 끝난 '뒤'(실측 약 0.3초 후)
+    # '로그인 기한이 만료되었습니다. 다시 로그인해주세요.' alert 이 뜬다.
+    # XHR 이 401 날 때마다 뜨므로 여러 개가 연달아 쌓이기도 한다 → 넉넉히 지켜본다.
+    ALERT_SETTLE_SEC = 4.0
 
     def login(self, driver) -> bool:
         """저장된 계정으로 자동 로그인(세션 만료 시 Hub 가 호출).
