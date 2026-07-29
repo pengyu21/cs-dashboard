@@ -1,10 +1,10 @@
 {
-  "version": "1.0.7",
-  "notes": "웹 대시보드에 실행 중인 버전 표시(시트 H3)",
+  "version": "1.0.8",
+  "notes": "강남언니 Q&A(미답변) 수집 추가 — 상담+Q&A 합산",
   "files": [
     {
       "name": "total.py",
-      "sha256": "f197b24d6164590f77e8af941a166504d2c0a5a2e5a32c096f7b31921c3c77bd"
+      "sha256": "e63c5403e04ddc682d7ceb3e8a3fcad327590f61af6fba741885c714c1ecf30d"
     },
     {
       "name": "run_dashboard.py",

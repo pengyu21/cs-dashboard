@@ -938,8 +938,17 @@ class BaseChannel(ABC):
     SHEET_TAB: str = ""
     SHEET_START: str = "A1"
     SHEET_CLEAR: str = ""
+    # 같은 탭 안에 '본 목록과 다른 모양의 블록'을 하나 더 쓸 때 비울 범위들.
+    # (예: 강남언니 탭의 Q&A 블록 M3:Q1000 — 본 목록 B3:K1000 과 안 겹친다)
+    SHEET_CLEAR_EXTRA: tuple = ()
 
     def to_sheet_rows(self, items: list) -> list:
+        return []
+
+    def extra_sheet_data(self, items: list) -> list:
+        """같은 batch_update 에 함께 실을 추가 블록.
+        [{"range": "M3", "values": [[...], ...]}, ...] 형태. 기본은 없음.
+        ※ 쓰기 호출 수를 늘리지 않으려고 별도 update 가 아니라 batch 에 합친다."""
         return []
 
     def after_write(self, ws) -> None:
@@ -1130,6 +1139,23 @@ class GangnamUnniChannel(BaseChannel):
     NOISE = {"채팅창으로 이동", "내원일 입력", "시술일 입력",
              "내원예약취소", "시술예정", "내원예약"}
 
+    # ── Q&A(이벤트 문의) ──────────────────────────────────────
+    # 상담목록과 같은 파트너 사이트의 별도 페이지. '답변 상태 = 미답변' 만 미확인으로 본다.
+    # 시트는 같은 '강남언니' 탭을 쓰되, 상담 블록(B3:K1000)과 절대 겹치지 않는
+    # M열 이후에 별도 블록으로 적는다. → 기존 시트/수식/Code.gs 와 충돌 없음.
+    #   (M열이 이미 쓰이고 있다면 아래 3개 상수만 다른 열로 바꾸면 된다)
+    QNA_URL = "https://partner.gangnamunni.com/service-offer/qna"
+    QNA_UNANSWERED = "미답변"
+    QNA_START = "M3"
+    QNA_CLEAR = "M3:Q1000"
+    QNA_HEADER_CELL = "M2"
+    QNA_HEADERS = ["작성일", "이벤트id", "이벤트명", "내용", "답변상태"]
+    SHEET_CLEAR_EXTRA = (QNA_CLEAR,)
+    # 내용 칸에 같이 들어오는 버튼 라벨(질문 본문이 아님)
+    QNA_NOISE = {"답변달기", "답변하기", "답변수정", "답변 달기"}
+    # 대시보드 '내용' 앞에 붙는 표식. Index.html 이 이걸로 Q&A 행을 구분한다.
+    QNA_MARK = "[Q&A] "
+
     def is_logged_in(self, driver) -> bool:
         """현재 탭 기준 판별(네비게이션은 Hub가 이미 함). SPA 정착까지 대기."""
         from selenium.webdriver.common.by import By
@@ -1229,7 +1255,8 @@ class GangnamUnniChannel(BaseChannel):
             doctor = " ".join(_cell_lines(tds[7])) if len(tds) > 7 else ""
             sms = " ".join(_cell_lines(tds[9])) if len(tds) > 9 else ""
 
-            out.append({"applied": applied, "customer": customer,
+            out.append({"kind": "consult",
+                        "applied": applied, "customer": customer,
                         "contact": contact, "route": route, "status": status,
                         "sisul": sisul, "doctor": doctor, "memo": memo, "sms": sms,
                         "row_key": row.get_attribute("data-row-key")})
@@ -1254,23 +1281,160 @@ class GangnamUnniChannel(BaseChannel):
                 self.header_cells["F1"] = v
         except Exception:
             pass
+
+        # ── Q&A(미답변)도 같은 탭에서 이어서 수집 ────────────────
+        # 잔액(E1/F1)은 위에서 이미 읽었으므로 이제 페이지를 옮겨도 안전하다.
+        # Q&A 쪽이 깨져도 상담목록 결과는 살린다(전체를 실패로 만들지 않음).
+        # 다음 사이클에 BrowserHub 가 LIST_URL 로 다시 이동시키므로 되돌릴 필요 없음.
+        try:
+            out.extend(self.scrape_qna(driver))
+        except Exception as e:
+            print(f"[{self.name}] Q&A 수집 건너뜀: {classify_error(e).detail}")
+        return out
+
+    # ── Q&A 페이지 ────────────────────────────────────────────
+    @staticmethod
+    def _qna_date(s: str):
+        """Q&A 목록의 작성일 '26.07.29' → '2026-07-29'. 다른 형식은 공통 변환에 맡김."""
+        s = (s or "").strip()
+        m = re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{2})", s)
+        if m:
+            return f"20{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        return _to_sheet_date(s)
+
+    def _qna_col_index(self, driver) -> dict:
+        """표 머리글(th) 텍스트 → 열 번호. 열 순서가 바뀌어도 따라가도록.
+        공백·마침표를 지운 키('No', '이벤트id', '이벤트명', '작성일', '내용', '답변상태')."""
+        from selenium.webdriver.common.by import By
+        idx = {}
+        for i, th in enumerate(driver.find_elements(
+                By.CSS_SELECTOR, "thead.ant-table-thead th")):
+            k = re.sub(r"[\s.]+", "", th.get_attribute("textContent") or "")
+            if k:
+                idx.setdefault(k, i)
+        return idx
+
+    def _set_qna_filter(self, driver, label: str) -> bool:
+        """'답변 상태' 셀렉트(antd Select)를 label 로 바꾼다. 성공 시 True.
+        실패해도 예외를 내지 않는다 — 아래에서 행 텍스트로 한 번 더 거르기 때문."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+        sel = None
+        try:
+            for s in driver.find_elements(By.CSS_SELECTOR, ".ant-select-selector"):
+                if s.is_displayed():
+                    sel = s
+                    break
+            if sel is None:
+                return False
+            if (sel.text or "").strip() == label:
+                return True
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'})", sel)
+            sel.click()
+            time.sleep(0.8)
+            for opt in driver.find_elements(
+                    By.CSS_SELECTOR, ".ant-select-dropdown .ant-select-item-option"):
+                if opt.is_displayed() and (opt.text or "").strip() == label:
+                    driver.execute_script("arguments[0].click();", opt)
+                    time.sleep(1.5)                 # 재조회 대기
+                    return True
+            sel.send_keys(Keys.ESCAPE)              # 옵션 못 찾음 → 드롭다운만 닫기
+        except Exception:
+            pass
+        return False
+
+    def scrape_qna(self, driver) -> List[dict]:
+        """/service-offer/qna 에서 답변 상태가 '미답변'인 문의만 반환."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        driver.get(self.QNA_URL)
+        self.dismiss_popups(driver)
+        # 빈 목록이면 tr.ant-table-placeholder 가 뜬다 → tr 로 기다려야 20초를 안 버린다
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "tbody.ant-table-tbody tr")))
+        time.sleep(1.0)
+
+        # 상태 필터를 '미답변'으로 좁힌다. 성공했을 때만 100건 보기로 넓힌다
+        # (전체 목록을 100건으로 펴면 느리다 — 상담목록에서 되돌린 이유와 같음).
+        if self._set_qna_filter(driver, self.QNA_UNANSWERED):
+            self._set_page_size(driver, "100")
+
+        idx = self._qna_col_index(driver)
+        FALLBACK = {"No": 0, "이벤트id": 1, "이벤트명": 2,
+                    "작성일": 3, "내용": 4, "답변상태": 5}
+
+        def cell(tds, key):
+            i = idx.get(key, FALLBACK.get(key))
+            return tds[i] if (i is not None and i < len(tds)) else None
+
+        def lines(tds, key):
+            el = cell(tds, key)
+            return _cell_lines(el) if el is not None else []
+
+        out = []
+        for row in driver.find_elements(
+                By.CSS_SELECTOR, "tbody.ant-table-tbody tr.ant-table-row"):
+            tds = row.find_elements(By.TAG_NAME, "td")
+            if len(tds) < 4:
+                continue
+            st_el = cell(tds, "답변상태") or tds[-1]
+            # '답변완료' 에는 '미답변' 이 안 들어가므로 부분일치로 판별해도 안전
+            if self.QNA_UNANSWERED not in " ".join(_cell_lines(st_el)):
+                continue
+            # 내용 칸에는 질문 + '답변달기' 버튼(미답변) 이 같이 들어온다
+            question = " ".join(l for l in lines(tds, "내용")
+                                if l not in self.QNA_NOISE)
+            out.append({
+                "kind": "qna",
+                "no": " ".join(lines(tds, "No")),
+                "event_id": " ".join(lines(tds, "이벤트id")),
+                # 이벤트명 칸엔 썸네일도 있어 여러 줄로 잡힐 수 있다 → 한 줄로 합침
+                "event": " ".join(lines(tds, "이벤트명")),
+                "date": self._qna_date(" ".join(lines(tds, "작성일"))),
+                "question": question,
+            })
         return out
 
     def to_sheet_rows(self, items: list) -> list:
+        # 상담 건만 B3:K1000 에. Q&A 는 모양이 달라 extra_sheet_data 로 따로 나간다.
         return [[_to_sheet_date(it["applied"]), it["customer"], it["contact"],
                  it["route"], it["status"], it["sisul"], it["doctor"],
-                 it["memo"], it["sms"]] for it in items]
+                 it["memo"], it["sms"]]
+                for it in items if it.get("kind") != "qna"]
+
+    def extra_sheet_data(self, items: list) -> list:
+        qs = [it for it in items if it.get("kind") == "qna"]
+        if not qs:
+            return []
+        return [{"range": self.QNA_START,
+                 "values": [[it["date"], it["event_id"], it["event"],
+                             it["question"], self.QNA_UNANSWERED] for it in qs]}]
 
     def dashboard_rows(self, items: list) -> list:
-        # [이름=고객정보, 내용=상담경로, 시각=신청일시, 연락처]
-        return [[it["customer"], it["route"],
-                 _to_sheet_date(it["applied"]), it["contact"]] for it in items]
+        # 상담: [이름=고객정보, 내용=상담경로, 시각=신청일시, 연락처]
+        # Q&A : [이름=이벤트명(줄임), 내용='[Q&A] 질문', 시각=작성일, 연락처=없음]
+        #   → 열 구조(5칸)는 그대로 두고 '내용' 앞의 표식으로만 구분한다.
+        #     (시트/Code.gs/GUI 어디도 안 바꿔도 되게)
+        rows = []
+        for it in items:
+            if it.get("kind") == "qna":
+                ev = it["event"]
+                rows.append([(ev[:18] + "…") if len(ev) > 19 else (ev or "Q&A"),
+                             self.QNA_MARK + it["question"], it["date"], ""])
+            else:
+                rows.append([it["customer"], it["route"],
+                             _to_sheet_date(it["applied"]), it["contact"]])
+        return rows
 
     def after_write(self, ws) -> None:
         # B열(신청일시) 날짜 표시서식
         ws.format(f"{self.SHEET_START}:B1000",
                   {"numberFormat": {"type": "DATE_TIME",
                                     "pattern": "yyyy.mm.dd hh:mm"}})
+        # Q&A 블록 머리글(M2~) — 상담 블록과 떨어져 있어 기존 열을 안 건드린다
+        ws.update(values=[self.QNA_HEADERS], range_name=self.QNA_HEADER_CELL)
 
     def _scrape(self, driver):
         return []
@@ -2206,8 +2370,11 @@ def write_channel_sheet(ch: "BaseChannel", items: list) -> int:
     ws = gc.open_by_url(GSHEET_URL).worksheet(ch.SHEET_TAB)
 
     rows = ch.to_sheet_rows(items)
-    if ch.SHEET_CLEAR:
-        _sheet_call(ws.batch_clear, [ch.SHEET_CLEAR])
+    extra = ch.extra_sheet_data(items)          # 같은 탭의 부가 블록(예: 강남언니 Q&A)
+    # 부가 블록은 이번에 쓸 게 없어도 '지난 사이클 잔재'를 남기면 안 되므로 항상 비운다.
+    clears = [r for r in ([ch.SHEET_CLEAR] + list(ch.SHEET_CLEAR_EXTRA)) if r]
+    if clears:
+        _sheet_call(ws.batch_clear, clears)
 
     # 값 쓰기를 한 번의 batch_update 로 묶는다.
     # (예전엔 rows / A1 / 잔액셀을 따로 호출해 채널당 3~4회를 썼다 →
@@ -2215,13 +2382,14 @@ def write_channel_sheet(ch: "BaseChannel", items: list) -> int:
     data = []
     if rows:
         data.append({"range": ch.SHEET_START, "values": rows})
+    data.extend(extra)
     data.append({"range": "A1", "values": [[_now_stamp()]]})   # A2 수식은 안 건드림
     for cell, val in (ch.header_cells or {}).items():          # 잔액 등
         data.append({"range": cell, "values": [[val]]})
     _sheet_call(ws.batch_update, data, value_input_option="USER_ENTERED")
 
     _apply_format_once(ch, ws)      # 헤더·날짜서식은 프로세스당 1회만
-    return len(rows)
+    return len(rows) + sum(len(d.get("values") or []) for d in extra)
 
 
 _KOR_DOW = ["월", "화", "수", "목", "금", "토", "일"]
