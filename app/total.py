@@ -2773,6 +2773,50 @@ def _save_notify_state(state: dict) -> None:
         print(f"[텔레그램] 상태 저장 오류: {e}")
 
 
+def _esc_html(s: str) -> str:
+    """텔레그램 parse_mode=HTML 로 보낼 본문 escape.
+    예외 원문에 '<' 가 섞이면 메시지 전체가 거부돼 알림이 통째로 사라진다."""
+    return (str(s or "").replace("&", "&amp;")
+            .replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _fmt_dur(sec: float) -> str:
+    """경과 초 → '3분' / '1시간 20분' / '1일 3시간'."""
+    m = int(max(0, sec) // 60)
+    if m < 1:
+        return "1분 미만"
+    d, h, mm = m // 1440, (m % 1440) // 60, m % 60
+    p = []
+    if d:
+        p.append(f"{d}일")
+    if h:
+        p.append(f"{h}시간")
+    if mm or not p:
+        p.append(f"{mm}분")
+    return " ".join(p)
+
+
+def _fail_rec(v) -> dict:
+    """state['fail'] 값 정규화 → {first, last, reason}.
+    first  = 처음 실패를 알린 시각(복구까지 걸린 시간 계산용)
+    last   = 마지막으로 알린 시각(재알림 간격용)
+    ※ 옛 형식(숫자 = 마지막 알림 시각)도 그대로 받아들인다. 버전이 섞여 돌아도
+      notified.json 때문에 알림이 죽으면 안 된다."""
+    if isinstance(v, dict):
+        def num(k):
+            try:
+                return float(v.get(k) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        return {"first": num("first"), "last": num("last"),
+                "reason": str(v.get("reason") or "")}
+    try:
+        t = float(v)
+    except (TypeError, ValueError):
+        t = 0.0
+    return {"first": t, "last": t, "reason": ""}
+
+
 def _row_fingerprint(row: list) -> str:
     """상세행 [채널, 이름, 내용, 시각, 연락처] → 안정적 지문.
     시각은 카카오톡 상대표시('오전 11:10')처럼 바뀌므로 제외한다."""
@@ -2851,16 +2895,41 @@ def notify_new_and_failures(detail_rows: list, failed: list,
     # ── 수집 실패(재알림 간격 적용) ──
     if not fresh:
         for ch_name, reason in failed:
-            last = state["fail"].get(ch_name, 0)
-            if now - last >= TELEGRAM_FAIL_RENOTIFY_MIN * 60:
-                if send_telegram(f"⚠️ <b>{ch_name} 수집 실패</b>\n{reason}"
+            rec = _fail_rec(state["fail"].get(ch_name))
+            if now - rec["last"] >= TELEGRAM_FAIL_RENOTIFY_MIN * 60:
+                if send_telegram(f"⚠️ <b>{ch_name} 수집 실패</b>\n{_esc_html(reason)}"
                                  + _collector_footer()):
-                    state["fail"][ch_name] = now
-    # 실패가 해소된 채널은 재알림 타이머 초기화
+                    rec["last"] = now
+                    rec["first"] = rec["first"] or now   # 첫 실패 시각은 유지
+                    rec["reason"] = reason
+                    state["fail"][ch_name] = rec
+
+    # ── 실패가 해소된 채널 → 정상화 알림(1회) + 재알림 타이머 초기화 ──
+    #    '실패 알림이 실제로 나갔던' 채널만 알린다. 알린 적 없는 일시 실패까지
+    #    복구를 알리면 조용히 지나갔어야 할 건에 알림이 붙는다.
+    #    브라우저가 끊기면 여러 채널이 한꺼번에 죽으므로 한 메시지로 묶는다.
     failed_names = {n for n, _ in failed}
+    recovered = []
     for n in list(state["fail"]):
-        if n not in failed_names:
-            state["fail"].pop(n, None)
+        if n in failed_names:
+            continue
+        rec = _fail_rec(state["fail"].pop(n))
+        if rec["last"]:
+            recovered.append((n, rec))
+
+    if recovered and not fresh:
+        if len(recovered) == 1:
+            name, rec = recovered[0]
+            body = (f"✅ <b>{name} 수집 정상화</b>\n"
+                    f"{_fmt_dur(now - rec['first'])} 만에 복구됐습니다.")
+            if rec["reason"]:
+                body += f"\n<i>직전 오류: {_esc_html(rec['reason'][:120])}</i>"
+        else:
+            lines = [f"✅ <b>수집 정상화</b> · {len(recovered)}개 채널"]
+            for name, rec in recovered:
+                lines.append(f"• <b>{name}</b> · {_fmt_dur(now - rec['first'])} 만에 복구")
+            body = "\n".join(lines)
+        send_telegram(body + _collector_footer())
 
     _save_notify_state(state)
 
