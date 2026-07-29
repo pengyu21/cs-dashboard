@@ -1,10 +1,10 @@
 {
-  "version": "1.0.8",
-  "notes": "강남언니 Q&A(미답변) 수집 추가 — 상담+Q&A 합산",
+  "version": "1.0.9",
+  "notes": "수집기 중복 실행 경고에 점유 프로세스 이름·PID 표시 + 종료 선택",
   "files": [
     {
       "name": "total.py",
-      "sha256": "e63c5403e04ddc682d7ceb3e8a3fcad327590f61af6fba741885c714c1ecf30d"
+      "sha256": "a3d57366e5968876df5d2a99d5c2780b76f6376a2cbe41d3e2af87ff1111a503"
     },
     {
       "name": "run_dashboard.py",

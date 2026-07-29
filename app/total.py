@@ -207,6 +207,78 @@ def collector_lock_held() -> bool:
     return False
 
 
+# ── 잠금을 쥔 프로세스 찾기 ────────────────────────────────────
+# '이미 실행 중'만 알려주면 작업 관리자에서 뭘 찾아야 할지 알 수 없다.
+# 윈도우 기본 명령(netstat·tasklist·taskkill)만 써서 추가 의존성 없이
+# '누가' 잡고 있는지 이름·PID 로 짚어주고, 원하면 그 자리에서 종료한다.
+def _run_hidden(cmd: list, timeout: int = 10) -> str:
+    """콘솔창 안 띄우고 외부 명령 실행 → stdout. 실패하면 빈 문자열."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           errors="replace", timeout=timeout,
+                           creationflags=0x08000000)     # CREATE_NO_WINDOW
+        return r.stdout or ""
+    except Exception:
+        return ""
+
+
+def port_holder_pid(port: int) -> Optional[int]:
+    """해당 TCP 포트를 듣고 있는 프로세스의 PID. 못 찾으면 None.
+    netstat 한 줄 예시(상태 표기는 한글 윈도우에서도 영문):
+        TCP    127.0.0.1:9765     0.0.0.0:0     LISTENING     12784
+    """
+    listen = other = None
+    for line in _run_hidden(["netstat", "-ano", "-p", "TCP"]).splitlines():
+        parts = line.split()
+        # parts[1]=로컬주소 로만 비교한다(상대주소가 같은 포트인 연결은 무관)
+        if len(parts) < 5 or not parts[1].endswith(f":{port}"):
+            continue
+        try:
+            pid = int(parts[-1])
+        except ValueError:
+            continue
+        if parts[-2].upper() == "LISTENING":
+            return pid
+        other = other or pid            # 상태 표기가 다른 환경 대비 폴백
+    return listen or other
+
+
+def process_name(pid: int) -> str:
+    """PID → 실행 파일 이름('CSdashboard.exe'). 못 찾으면 빈 문자열."""
+    out = _run_hidden(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"])
+    m = re.match(r'"([^"]+)"', out.strip())
+    return m.group(1) if m else ""
+
+
+def collector_lock_holder() -> Optional[tuple]:
+    """수집기 잠금 포트를 쥔 프로세스 (PID, 이름). 못 찾으면 None."""
+    pid = port_holder_pid(COLLECTOR_LOCK_PORT)
+    if pid is None:
+        return None
+    return pid, (process_name(pid) or "이름 확인 불가")
+
+
+def kill_pid(pid: int) -> bool:
+    """PID 강제 종료 후 잠금이 실제로 풀렸는지까지 확인.
+    ※ /T(자식 트리)는 쓰지 않는다 — 수집기가 띄운 '로그인된 상주 크롬'까지
+      같이 죽어서 다음 실행 때 전 채널 재로그인(캡챠 위험)이 걸린다."""
+    _run_hidden(["taskkill", "/PID", str(pid), "/F"], timeout=15)
+    for _ in range(20):                 # 포트가 OS 로 회수될 때까지 최대 5초
+        if not collector_lock_held():
+            return True
+        time.sleep(0.25)
+    return not collector_lock_held()
+
+
+def app_exe_name() -> str:
+    """지금 실행 중인 파일 이름(exe 면 'CSdashboard.exe', 소스 실행이면 'python.exe').
+    안내 문구에 옛 exe 이름을 박아두면 작업 관리자에서 못 찾는다."""
+    try:
+        return Path(sys.executable).name
+    except Exception:
+        return "CSdashboard.exe"
+
+
 def _build_chrome(opts):
     """크롬 드라이버 인스턴스 생성.
 
@@ -3428,19 +3500,54 @@ class App(tk.Tk):
             self.auto_var.set(True)
             self._start_collector()
 
+    def _resolve_lock_holder(self) -> bool:
+        """수집기 잠금(포트 9765)을 쥔 프로세스를 이름·PID 로 알려주고,
+        사용자가 원하면 그 자리에서 종료한다.
+        반환 True = 잠금이 풀렸으니 수집기를 시작해도 된다."""
+        holder = collector_lock_holder()
+        if holder is None:
+            # 포트는 잡혔는데 주인을 못 찾음(netstat 실패·권한 등) → 안내만.
+            # 소스 실행이면 app_exe_name()이 이미 python.exe 라 중복을 지운다.
+            names = " · ".join(dict.fromkeys([app_exe_name(), "python.exe"]))
+            messagebox.showwarning(
+                "수집기 중복 실행",
+                "이미 다른 수집기가 실행 중입니다.\n\n"
+                "다른 대시보드 창이나 예전 버전 exe 가 떠 있는지 확인하세요.\n"
+                f"(작업 관리자 › 세부 정보에서 {names} 확인)")
+            return False
+
+        pid, name = holder
+        if not messagebox.askyesno(
+                "수집기 중복 실행",
+                "이미 다른 수집기가 실행 중입니다.\n\n"
+                f"        {name}   (PID {pid})\n\n"
+                "이 수집기를 종료하고 계속할까요?\n\n"
+                "· 로그인된 상주 크롬은 종료되지 않습니다.\n"
+                "· 저 수집기를 띄운 예전 대시보드 창이 남아 있다면\n"
+                "  그 창은 따로 닫아 주세요.", icon="warning"):
+            return False
+
+        if not kill_pid(pid):
+            messagebox.showerror(
+                "종료 실패",
+                f"{name} (PID {pid}) 를 종료하지 못했습니다.\n\n"
+                "작업 관리자 › 세부 정보에서 직접 종료한 뒤 다시 시도하세요.")
+            return False
+
+        # 강제 종료된 수집기는 finally 를 못 돌아 시트 잠금이 남는다 → 대신 반납.
+        # (안 하면 다른 PC 가 하트비트 만료까지 기다린다) 네트워크 호출이라 별도 스레드.
+        threading.Thread(target=release_sheet_lock, daemon=True).start()
+        self.status.config(text=f"이전 수집기 종료됨 · {name} (PID {pid})")
+        return True
+
     def _start_collector(self):
         if self._collector_running():
             return
         # 이 GUI 가 띄운 게 아닌 수집기(옛 exe·다른 창)가 이미 돌고 있으면 막는다.
         # 두 수집기가 같은 브라우저/시트를 다투면 정상 결과가 '실패'로 덮어써진다.
-        if collector_lock_held():
+        if collector_lock_held() and not self._resolve_lock_holder():
             self.auto_var.set(False)
             self._update_collector_label()
-            messagebox.showwarning(
-                "수집기 중복 실행",
-                "이미 다른 수집기가 실행 중입니다.\n\n"
-                "다른 창이나 예전 버전 exe 가 떠 있는지 확인하세요.\n"
-                "(작업 관리자에서 CounselTotal.exe / CStotal.exe / python.exe 확인)")
             return
         # 다른 PC가 잠금을 쥔 경우 — 수집기가 조용히 죽는 대신 여기서 이유를 알린다
         blocker = sheet_lock_blocker()
@@ -3601,8 +3708,10 @@ def _run_collector() -> None:
     # 한쪽이 성공한 결과를 다른 쪽이 '실패'로 덮어쓴다.
     lock = acquire_collector_lock()
     if lock is None:
+        holder = collector_lock_holder()
+        who = f" — {holder[1]} (PID {holder[0]})" if holder else ""
         print(f"[중단] 이미 다른 수집기가 실행 중입니다"
-              f"(포트 {COLLECTOR_LOCK_PORT} 점유). 이 프로세스는 종료합니다.")
+              f"(포트 {COLLECTOR_LOCK_PORT} 점유){who}. 이 프로세스는 종료합니다.")
         f.flush()
         return
 
