@@ -1,10 +1,10 @@
 {
-  "version": "1.0.12",
-  "notes": "바비톡 로그인 1회만 시도 · 거부 alert 을 읽고 5분30초 뒤 재시도(3연타로 계정이 5분 잠기던 문제)",
+  "version": "1.0.13",
+  "notes": "카카오톡 세션 만료 시 계정 선택 화면에서 지정 계정 자동 클릭(다른 계정으로는 로그인 안 함)",
   "files": [
     {
       "name": "total.py",
-      "sha256": "8e1d3a48398e6fe6f0b6b57ef4ae42b369697ca7c8bad60c9ab59ec6fdf5df00"
+      "sha256": "397bc2501f26a548cc9dbb02cff892f598c5df7661547fe9e99998d360ab9d38"
     },
     {
       "name": "run_dashboard.py",

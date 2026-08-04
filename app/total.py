@@ -2047,6 +2047,9 @@ class KakaoTalkChannel(BaseChannel):
     CAPTCHA_WAIT = 150      # 2단계 인증(앱 승인)을 사람이 처리할 시간
     LOGIN_SUBMIT_RETRY = 3  # 로그인 폼이 그대로 다시 뜰 때 submit 재시도 횟수
     LOGIN_HELP = "python kakao_login.py 실행 후 카카오톡 앱에서 2단계 인증 승인"
+    # 세션 만료 시 뜨는 '로그인할 카카오계정 선택'(간편로그인) 목록의 계정 항목
+    ACCOUNT_PICK_SEL = "ul.list_easy a.wrap_profile"
+    ACCOUNT_PICK_RETRY = 6  # 계정 클릭이 씹힐 때 재클릭 횟수(내 계정 클릭이라 위험 없음)
 
     # 시트 매핑: a.link_chat 블록 → '카카오톡' 탭
     #   B 카톡이름(span.txt_name) C 내용(p.txt_info) D 시각(span.txt_date) E 개수(span.num_round)
@@ -2061,7 +2064,27 @@ class KakaoTalkChannel(BaseChannel):
         return "accounts.kakao.com" in u or "/login" in u.lower()
 
     def is_logged_in(self, driver) -> bool:
-        return not self._at_login(driver)
+        """URL 이 로그인 화면이 아니고, 로그인 폼·계정 선택 목록도 화면에 없어야 로그인 상태.
+        center-pf → accounts 리디렉션이 늦게 걸려 URL 만으로 보면 '로그인됨' 오판이 난다."""
+        if self._at_login(driver):
+            return False
+        try:
+            return not (self._at_login_form(driver) or self._account_rows(driver))
+        except Exception:
+            return True
+
+    def _wait_logged_in(self, driver, secs: float) -> bool:
+        """secs 안에 로그인이 끝나면 True. 리디렉션 도중 한 번 True 로 보이는 경우가 있어
+        1초 뒤 한 번 더 확인해 두 번 연속 참일 때만 인정한다."""
+        end = time.monotonic() + secs
+        while True:
+            if self.is_logged_in(driver):
+                time.sleep(1.0)
+                if self.is_logged_in(driver):
+                    return True
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.5)
 
     def _click_ico_check(self, driver) -> None:
         """보이는 ico_check 체크박스 클릭(간편로그인 저장 / 2차인증 안 함)."""
@@ -2084,6 +2107,104 @@ class KakaoTalkChannel(BaseChannel):
             if e.is_displayed():
                 return e
         return None
+
+    @staticmethod
+    def _pw_field(driver):
+        """보이는 비밀번호 입력칸. 계정 선택 후에는 비번 칸만 뜨는 화면도 있다."""
+        from selenium.webdriver.common.by import By
+        for e in driver.find_elements(By.CSS_SELECTOR, "input[name='password']"):
+            if e.is_displayed():
+                return e
+        return None
+
+    def _at_login_form(self, driver) -> bool:
+        """아이디/비번 입력 화면(둘 중 하나라도 보이면)."""
+        return (self._login_form_id(driver) is not None
+                or self._pw_field(driver) is not None)
+
+    @staticmethod
+    def _safe_click(driver, el) -> bool:
+        try:
+            el.click()
+            return True
+        except Exception:
+            try:
+                driver.execute_script("arguments[0].click();", el)
+                return True
+            except Exception:
+                return False
+
+    def _account_rows(self, driver) -> list:
+        """'로그인할 카카오계정 선택'(간편로그인) 화면의 계정 항목들. 없으면 빈 리스트."""
+        from selenium.webdriver.common.by import By
+        return [a for a in driver.find_elements(By.CSS_SELECTOR, self.ACCOUNT_PICK_SEL)
+                if a.is_displayed()]
+
+    def _acct_match(self, shown: str) -> bool:
+        """계정 목록에 표시된 아이디가 USER_ID 와 같은 계정인지.
+        카카오가 abcd12**@example.com 처럼 일부를 가려 보여주는 경우도 맞춘다."""
+        want = (self.USER_ID or "").strip().lower()
+        shown = (shown or "").strip().lower()
+        if not want or not shown:
+            return False
+        if shown == want:
+            return True
+        return (len(shown) == len(want)
+                and all(c in ("*", "•") or c == w for c, w in zip(shown, want)))
+
+    def _pick_saved_account(self, driver) -> bool:
+        """세션 만료 후 뜨는 '로그인할 카카오계정 선택' 화면에서 USER_ID 계정을 클릭.
+        클릭했으면 True. 그 화면이 아니거나 목록에 USER_ID 가 없으면 False —
+        '새로운 계정으로 로그인'은 누르지 않는다(USER_ID 계정으로만 접속)."""
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        if not self._account_rows(driver):
+            return False
+        time.sleep(1.5)     # 목록이 DOM 에 뜬 직후엔 아직 클릭 이벤트가 안 붙어 씹힌다
+        rows = self._account_rows(driver)
+        if not rows:
+            return False
+
+        target, shown = None, ""
+        listed = []
+        for a in rows:
+            t = self._blk_text(a, "span.tit_profile")
+            listed.append(t)
+            if self._acct_match(t):
+                target, shown = a, t
+                break
+
+        if target is None:                      # 다른 계정은 절대 누르지 않는다
+            print(f"[{self.name}] 계정 목록에 {self.USER_ID} 가 없습니다 "
+                  f"(목록: {', '.join(x for x in listed if x) or '없음'}) — "
+                  f"직접 로그인해 주세요.")
+            return False
+
+        print(f"[{self.name}] 간편로그인 계정 선택: {shown}")
+        self._safe_click(driver, target)
+
+        try:            # 화면 전환(로그인 완료 / 비번 입력 / 2단계 인증)까지 대기
+            WebDriverWait(driver, 20).until(lambda d: not self._account_rows(d))
+        except Exception:
+            pass
+        time.sleep(1.5)
+        return True
+
+    def _clear_account_picker(self, driver) -> bool:
+        """계정 선택 화면이 사라질 때까지 내 계정을 눌러본다. 로그인까지 됐으면 True.
+        (내 계정을 누르는 것뿐이라 반복해도 계정 잠금 위험이 없어 비번 submit 보다
+         재시도를 넉넉히 준다 — 첫 클릭이 씹히는 경우가 잦다.)"""
+        for i in range(1, self.ACCOUNT_PICK_RETRY + 1):
+            if not self._account_rows(driver):
+                return self.is_logged_in(driver)
+            if i > 1:
+                print(f"[{self.name}] 계정 선택 화면 잔류 — 다시 선택 "
+                      f"{i}/{self.ACCOUNT_PICK_RETRY}")
+            if not self._pick_saved_account(driver):
+                return False        # 목록에 내 계정이 없음 — 더 눌러봐야 소용없다
+            if self._wait_logged_in(driver, 10):
+                return True
+        return False
 
     @staticmethod
     def _login_error(driver) -> str:
@@ -2126,24 +2247,22 @@ class KakaoTalkChannel(BaseChannel):
     def _fill_credentials(self, driver, id_in=None) -> None:
         """아이디/비번 칸이 비어 있을 때만 채운다.
         간편로그인으로 이미 채워진 화면(로그인 버튼만 누르면 되는 상태)은 건드리지 않는다."""
-        from selenium.webdriver.common.by import By
         id_in = id_in or self._login_form_id(driver)
-        if id_in is None:
-            return
-        if not (id_in.get_attribute("value") or "").strip():
+        if id_in is not None and not (id_in.get_attribute("value") or "").strip():
             id_in.clear(); id_in.send_keys(self.USER_ID)
             time.sleep(0.8)
-        for pw in driver.find_elements(By.CSS_SELECTOR, "input[name='password']"):
-            if not pw.is_displayed():
-                continue
-            if not (pw.get_attribute("value") or ""):
-                pw.clear(); pw.send_keys(self.USER_PW)
-                time.sleep(0.5)
-            break
+        pw = self._pw_field(driver)             # 계정 선택 후엔 비번 칸만 뜨기도 한다
+        if pw is not None and not (pw.get_attribute("value") or ""):
+            pw.clear(); pw.send_keys(self.USER_PW)
+            time.sleep(0.5)
 
     def login(self, driver) -> bool:
         """
-        카카오계정 로그인 → 2단계 인증이 뜨면 로그로 알리고 '이 기기에서 2차 인증 안 함'
+        세션 만료 시 '로그인할 카카오계정 선택'(간편로그인) 화면이 먼저 뜨는데, 이때는
+        아이디 입력칸이 없으므로 목록에서 USER_ID 계정을 눌러 넘긴다. 목록에 USER_ID 가
+        없으면 '새로운 계정으로 로그인'을 누르지 않고 중단한다(USER_ID 로만 접속).
+
+        이어서 카카오계정 로그인 → 2단계 인증이 뜨면 로그로 알리고 '이 기기에서 2차 인증 안 함'
         체크 + '확인' 후, 사람이 카카오톡 앱에서 승인할 때까지 대기(CAPTCHA_WAIT).
         (name 기반 셀렉터 사용 — loginId--1 등 --N 접미사 id는 자동생성이라 불안정)
 
@@ -2151,56 +2270,74 @@ class KakaoTalkChannel(BaseChannel):
         (아이디/비번이 이미 채워진 화면 포함) '로그인' 버튼만 다시 눌러 넘긴다.
         """
         from selenium.webdriver.common.by import By
-        from selenium.webdriver.support import expected_conditions as EC
         from selenium.webdriver.support.ui import WebDriverWait
 
         driver.get(self.LOGIN_URL)              # → accounts.kakao.com/login 리디렉션
-        wait = WebDriverWait(driver, 20)
-        id_in = wait.until(EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "input[name='loginId']")))
-        id_in.clear(); id_in.send_keys(self.USER_ID)
-        time.sleep(1)
-        pw = driver.find_element(By.CSS_SELECTOR, "input[name='password']")
-        pw.clear(); pw.send_keys(self.USER_PW)
-        time.sleep(0.5)
-
-        # 간편로그인 정보 저장 체크(세션 유지)
-        try:
-            box = driver.find_element(By.CSS_SELECTOR, "input[name='saveSignedIn']")
-            if not box.is_selected():
-                self._click_ico_check(driver)
+        try:            # 로그인 폼이든 계정 선택 목록이든 '로그인 화면'이 뜰 때까지 대기.
+                        # 리디렉션이 늦어 URL 이 아직 center-pf 인 순간에 '로그인됨'으로
+                        # 단정하면 계정을 누르지도 않고 성공 처리돼 버린다.
+            WebDriverWait(driver, 20).until(
+                lambda d: self._at_login_form(d) or self._account_rows(d))
         except Exception:
             pass
 
-        self._submit_login(driver)
-        time.sleep(4)
+        if not (self._at_login_form(driver) or self._account_rows(driver)):
+            return self.is_logged_in(driver)    # 로그인 화면이 안 뜸 = 세션 살아있음
 
-        if self.is_logged_in(driver):           # 2차 인증 없이 통과
-            return True
+        # ── 세션 만료 후 '로그인할 카카오계정 선택' 화면이면 내 계정을 눌러 넘긴다 ──
+        if self._account_rows(driver):
+            if self._clear_account_picker(driver):
+                return True                     # 비번 없이 바로 통과(간편로그인)
+            if self._account_rows(driver):      # 아직 목록 = 내 계정을 못 눌렀다
+                print(f"[{self.name}] 계정 선택 화면을 넘기지 못했습니다.")
+                return False
 
-        # ── 로그인 폼이 그대로 남은 경우: '로그인' 버튼만 다시 누른다 ──
+        id_in = self._login_form_id(driver)
+        if id_in is not None or self._pw_field(driver) is not None:
+            self._fill_credentials(driver, id_in)   # 비어 있는 칸만 채움
+
+            # 간편로그인 정보 저장 체크(세션 유지)
+            try:
+                box = driver.find_element(By.CSS_SELECTOR, "input[name='saveSignedIn']")
+                if not box.is_selected():
+                    self._click_ico_check(driver)
+            except Exception:
+                pass
+
+            self._submit_login(driver)
+            if self._wait_logged_in(driver, 8):  # 2차 인증 없이 통과
+                return True
+
+        # ── 로그인 폼/계정 선택이 그대로 남은 경우: 다시 눌러 넘긴다 ──
         for i in range(1, self.LOGIN_SUBMIT_RETRY + 1):
+            if self._account_rows(driver):      # 계정 선택 화면으로 되돌아옴
+                print(f"[{self.name}] 계정 선택 화면 재출현 {i}/{self.LOGIN_SUBMIT_RETRY}")
+                if self._clear_account_picker(driver):
+                    return True
+                if self._account_rows(driver):
+                    print(f"[{self.name}] 계정 선택 화면을 넘기지 못했습니다.")
+                    return False
+                continue
             f = self._login_form_id(driver)
-            if f is None:                       # 폼이 사라짐 = 2단계 인증 화면으로 넘어감
-                break
+            if f is None and self._pw_field(driver) is None:
+                break                           # 폼이 사라짐 = 2단계 인증 화면으로 넘어감
             err = self._login_error(driver)
             if err:                             # 비번 오류 등 — 더 눌러도 잠기기만 한다
                 print(f"[{self.name}] 로그인 실패: {err}")
                 return False
-            acc = (f.get_attribute("value") or "").strip()
+            acc = (f.get_attribute("value") or "").strip() if f is not None else ""
             print(f"[{self.name}] 로그인 폼 잔류 — '로그인' 재클릭 {i}/"
-                  f"{self.LOGIN_SUBMIT_RETRY} (계정: {acc or '비어있음'})")
+                  f"{self.LOGIN_SUBMIT_RETRY} (계정: {acc or self.USER_ID})")
             self._fill_credentials(driver, f)   # 비어 있을 때만 채움
             if not self._submit_login(driver):
                 print(f"[{self.name}] 로그인 버튼을 찾지 못했습니다.")
                 return False
-            time.sleep(4)
-            if self.is_logged_in(driver):
+            if self._wait_logged_in(driver, 8):
                 return True
 
         if self.is_logged_in(driver):
             return True
-        if self._login_form_id(driver) is not None:   # 아직도 폼 → 2FA 대기는 무의미
+        if self._at_login_form(driver):         # 아직도 폼 → 2FA 대기는 무의미
             print(f"[{self.name}] 로그인 폼을 넘기지 못했습니다: "
                   f"{self._login_error(driver) or '원인 불명'}")
             return False
@@ -2218,10 +2355,8 @@ class KakaoTalkChannel(BaseChannel):
                     break
         except Exception:
             pass
-        try:                                    # 앱 승인 완료(=로그인화면 벗어남)까지 대기
-            WebDriverWait(driver, self.CAPTCHA_WAIT).until(
-                lambda d: self.is_logged_in(d))
-        except Exception:
+        # 앱 승인 완료(=로그인화면 벗어남)까지 대기
+        if not self._wait_logged_in(driver, self.CAPTCHA_WAIT):
             print(f"[{self.name}] 2단계 인증 미완료(시간초과). 다시 실행해 주세요.")
             return False
         return True
