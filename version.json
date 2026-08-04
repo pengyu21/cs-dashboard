@@ -1,10 +1,10 @@
 {
-  "version": "1.0.11",
-  "notes": "바비톡 세션만료 alert 로 재로그인이 막히던 문제 수정",
+  "version": "1.0.12",
+  "notes": "바비톡 로그인 1회만 시도 · 거부 alert 을 읽고 5분30초 뒤 재시도(3연타로 계정이 5분 잠기던 문제)",
   "files": [
     {
       "name": "total.py",
-      "sha256": "647931d67d142396508d45d4de6221b8698b485a0302fc4951005cdbab4a1bd2"
+      "sha256": "8e1d3a48398e6fe6f0b6b57ef4ae42b369697ca7c8bad60c9ab59ec6fdf5df00"
     },
     {
       "name": "run_dashboard.py",

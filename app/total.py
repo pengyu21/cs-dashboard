@@ -454,6 +454,12 @@ class BrowserHub:
     PAGE_LOAD_TIMEOUT = 45
     RECYCLE_AFTER_SEC = 6 * 3600
     LOGIN_BACKOFF_SEC = 10 * 60         # 로그인 실패 후 재시도 안 하는 시간(10분)
+                                        # ※ 채널이 같은 이름의 값을 들고 있으면 그쪽 우선
+                                        #   (바비톡처럼 '몇 분 뒤 재시도'가 정답인 사이트)
+
+    def _backoff_sec(self, ch: "BaseChannel") -> float:
+        """이 채널의 로그인 실패 대기시간. 채널이 정해두지 않았으면 공통값(10분)."""
+        return float(getattr(ch, "LOGIN_BACKOFF_SEC", 0) or self.LOGIN_BACKOFF_SEC)
 
     def __init__(self, headless: bool = False, persistent: bool = True):
         self.headless = headless
@@ -587,11 +593,14 @@ class BrowserHub:
                     ch.login_error = ch.login_error or classify_error(e).detail
                 if not ok:
                     # 실패(캡챠/입력오류 등) → 백오프(반복 로그인 시도 차단) + 안내
-                    self._backoff[ch.key] = time.monotonic() + self.LOGIN_BACKOFF_SEC
+                    wait_sec = self._backoff_sec(ch)
+                    self._backoff[ch.key] = time.monotonic() + wait_sec
                     hint = f" | 수동 로그인: {ch.LOGIN_HELP}" if ch.LOGIN_HELP else ""
                     why = getattr(ch, "login_error", "") or ""
+                    m, s = divmod(int(wait_sec), 60)
+                    when = f"{m}분" + (f" {s}초" if s else "")
                     raise RuntimeError(
-                        f"자동 로그인 실패 — {int(self.LOGIN_BACKOFF_SEC/60)}분간 건너뜀"
+                        f"자동 로그인 실패 — {when} 뒤 다시 시도"
                         + (f" ({why})" if why else "") + hint)
                 self.driver.get(ch.LIST_URL)
                 self._accept_alert(max(2.0, getattr(ch, "ALERT_SETTLE_SEC", 0.0)))
@@ -723,6 +732,13 @@ class BaseChannel(ABC):
     LOGIN_URL_MARK = "/login"   # URL 에 이 문구가 있으면 '아직 로그인 화면'
     LOGIN_SUBMIT_RETRY = 3      # 클릭이 씹혀 폼이 남을 때 재클릭 횟수
     LOGIN_WAIT_SEC = 15         # 클릭 후 로그인 완료까지 대기(초)
+    POST_SUBMIT_ALERT_SEC = 0.0  # 클릭 직후 '결과 alert' 을 먼저 읽는 시간(초)
+                                 # >0 이면 로그인 결과를 alert 으로만 알려주는 사이트용
+    # 이 문구가 alert 에 들어 있으면 '계정 거부' — 재클릭해도 소용없고,
+    # 오히려 사이트의 '연속 실패 횟수'만 채워 계정이 잠긴다 → 즉시 중단한다.
+    # ※ 너무 흔한 말('않습니다','잠')은 넣지 않는다 — 멀쩡한 안내까지 거부로 오인한다.
+    REJECT_ALERT_WORDS = ("잘못된", "일치하지", "제한", "차단", "잠겼", "잠금",
+                          "비밀번호를", "다시 입력", "실패")
     FILL_WITH_KEYS = False      # True=실제 키 입력을 먼저(값 주입이 막히는 폼)
     FILL_PAUSE_SEC = 0.4        # 한 칸 입력 후 쉬는 시간(봇 탐지 완화용으로 늘림)
 
@@ -816,7 +832,12 @@ class BaseChannel(ABC):
         id_in = self._first_visible(driver, self.ID_SELECTORS)
         pw = self._first_visible(driver, self.PW_SELECTORS)
         if id_in is None or pw is None:
-            self.login_error = "로그인 폼(아이디/비번 칸)을 찾지 못했습니다"
+            # ⚠️ '못 찾음'을 곧이곧대로 믿지 말 것. _first_visible 은 alert 이 떠 있어
+            #    명령이 막힌 경우까지 None 으로 뭉갠다(폼은 화면에 멀쩡히 있는데도).
+            #    실제로 이 메시지 때문에 '셀렉터가 깨졌나' 하고 한참 헤맸다.
+            blocked = self._pop_alert(driver)
+            self.login_error = (f"알림창이 막고 있었습니다: {' '.join(blocked.split())[:100]}"
+                                if blocked else "로그인 폼(아이디/비번 칸)을 찾지 못했습니다")
             return False
         first, second = ((self._key_fill, self._react_fill) if self.FILL_WITH_KEYS
                          else (self._react_fill, self._key_fill))
@@ -919,6 +940,28 @@ class BaseChannel(ABC):
                             else "로그인 버튼을 찾지 못했습니다")
         return False
 
+    def _note_alert(self, msg: str) -> bool:
+        """클릭 후 뜬 alert 을 실패 사유로 기록. '계정 거부'면 True(=중단하라)."""
+        if not msg:
+            return False
+        self.login_error = " ".join(msg.split())[:120]      # 여러 줄 → 한 줄
+        print(f"[{self.name}] 로그인 알림창: {self.login_error}")
+        if self._is_reject_alert(self.login_error):
+            print(f"[{self.name}] 로그인 거부 — 재클릭하지 않습니다(계정 잠김 방지)")
+            return True
+        return False
+
+    def _is_reject_alert(self, msg: str) -> bool:
+        """alert 문구가 '계정 거부'인가(= 다시 눌러도 안 되는 실패인가).
+
+        세션 만료 안내('로그인 기한이 만료되었습니다')처럼 '다시 로그인하면 되는'
+        알림과 구분해야 한다. 만료 안내는 재클릭이 정답이지만, 아이디/비번 거부는
+        재클릭이 사이트의 연속 실패 카운터만 올려 계정을 잠근다."""
+        t = " ".join((msg or "").split())
+        if not t or "만료" in t:            # 만료 안내는 거부가 아니다
+            return False
+        return any(w in t for w in self.REJECT_ALERT_WORDS)
+
     def _login_error_text(self, driver) -> str:
         """폼에 떠 있는 오류 문구(비번 불일치 등). 없으면 ''.
         오류가 있는데 계속 누르면 계정이 잠기므로 재시도를 멈추는 근거로 쓴다."""
@@ -966,16 +1009,26 @@ class BaseChannel(ABC):
                 print(f"[{self.name}] 로그인 클릭 실패 — {self.login_error}")
                 return False
             print(f"[{self.name}] '로그인' 클릭 {i}/{self.LOGIN_SUBMIT_RETRY} — 결과 대기")
-            try:
+            # ⚠️ 순서 주의 — 결과 alert 을 '기다리기보다 먼저' 읽는다.
+            #    chromedriver 기본값(dismiss and notify)은 alert 이 떠 있는 동안
+            #    들어온 첫 명령으로 그 alert 을 '닫아버리고' 예외를 낸다.
+            #    예전엔 아래 WebDriverWait 안의 _at_login_page() 가 그 첫 명령이었고,
+            #    거기서 예외를 삼켜(True 반환) 버려서 — 바비톡처럼 로그인 결과를
+            #    alert 으로만 알려주는 사이트는 실패 사유가 통째로 사라졌다.
+            #    그 결과 '클릭이 씹혔나 보다'로 오판해 재클릭 → 사이트의 연속 실패
+            #    카운터를 우리 손으로 채워 계정이 잠기는 악순환이 돌았다.
+            if self._note_alert(self._pop_alert(driver, self.POST_SUBMIT_ALERT_SEC)):
+                return False                # 거부 alert → 재클릭 금지
+            try:                            # 로그인 완료(=로그인 화면 이탈) 대기
                 WebDriverWait(driver, self.LOGIN_WAIT_SEC).until(
                     lambda d: not self._at_login_page(d))
             except Exception:
                 pass
-            msg = self._pop_alert(driver)   # 클릭 후 뜨는 알림창(로그인 실패 안내 등)
-            if msg:
-                self.login_error = msg
-                print(f"[{self.name}] 로그인 알림창: {msg}")
+            if self._note_alert(self._pop_alert(driver)):   # 뒤늦게 뜨는 알림창
+                return False
             if not self._at_login_page(driver):
+                # 통과했으면 도중에 기록해둔 알림(만료 안내 등)은 실패 사유가 아니다
+                self.login_error = ""
                 print(f"[{self.name}] 자동 로그인 성공")
                 return True
             err = self._login_error_text(driver)
@@ -1122,10 +1175,23 @@ class BabitalkChannel(BaseChannel):
     # XHR 이 401 날 때마다 뜨므로 여러 개가 연달아 쌓이기도 한다 → 넉넉히 지켜본다.
     ALERT_SETTLE_SEC = 4.0
 
+    # ── 바비톡은 '사람처럼' 한 번만 누른다 ────────────────────────────
+    # 바비톡은 로그인 결과를 오직 JS alert 으로만 알려주고(폼에 오류 문구가 없다),
+    # 실패가 5회 쌓이면 5분간 로그인을 막는다. 실측한 alert 문구:
+    #   '잘못된 아이디 또는 비밀번호입니다.
+    #    5회 이상 불일치 할 경우, 5분간 로그인이 제한됩니다.'
+    # 예전엔 이 alert 을 읽지 못해 '클릭이 씹혔다'고 오판하고 한 번에 3연타 →
+    # 두 사이클이면 5회를 넘겨 스스로 차단을 만들고, 차단 때문에 또 실패하는
+    # 악순환에 빠졌다(비밀번호는 멀쩡한데도). 사람이 손으로 할 땐 한 번 누르고
+    # 안 되면 몇 분 뒤 다시 누르므로 걸리지 않는다 → 그 방식을 그대로 따른다.
+    LOGIN_SUBMIT_RETRY = 1       # 연타 금지: 한 사이클에 클릭 1회만
+    POST_SUBMIT_ALERT_SEC = 3.0  # 클릭 직후 결과 alert 을 먼저 읽는다
+    LOGIN_BACKOFF_SEC = 5.5 * 60  # 실패 시 5분 30초 쉬었다 재시도(차단 5분 + 여유)
+
     def login(self, driver) -> bool:
         """저장된 계정으로 자동 로그인(세션 만료 시 Hub 가 호출).
-        입력 반영 확인 → 버튼 활성화 대기 → 클릭(폴백) → 결과 확인 → 재클릭까지
-        전부 BaseChannel 공통부가 처리한다."""
+        채우고 → 한 번 누르고 → alert 으로 결과 확인. 거부면 그대로 멈추고,
+        Hub 가 LOGIN_BACKOFF_SEC(5분 30초) 뒤에 다시 부른다."""
         return self._do_login_flow(driver)
 
 
