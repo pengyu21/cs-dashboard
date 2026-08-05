@@ -1,10 +1,10 @@
 {
-  "version": "1.0.13",
-  "notes": "카카오톡 세션 만료 시 계정 선택 화면에서 지정 계정 자동 클릭(다른 계정으로는 로그인 안 함)",
+  "version": "1.0.14",
+  "notes": "바비톡 로그인 실패 원인 수정 — 만료 alert 이 쌓이면 로그인 폼을 못 찾던 문제(알림창을 치우고 재조회)",
   "files": [
     {
       "name": "total.py",
-      "sha256": "397bc2501f26a548cc9dbb02cff892f598c5df7661547fe9e99998d360ab9d38"
+      "sha256": "161b6c93aeda2a4ac8530c4ac3ba700dd9c86967d796ee5c9eaca6891d582f7d"
     },
     {
       "name": "run_dashboard.py",

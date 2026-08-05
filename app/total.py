@@ -744,16 +744,41 @@ class BaseChannel(ABC):
 
     @staticmethod
     def _first_visible(driver, selectors):
-        """CSS selectors 중 화면에 보이는 첫 요소. 없으면 None."""
+        """CSS selectors 중 화면에 보이는 첫 요소. 없으면 None.
+
+        ⚠️ alert 이 떠 있으면 find_elements 가 예외를 낸다. 이때 chromedriver 는
+           기본값(dismiss and notify)대로 그 alert 을 '이미 닫은 뒤' 예외를 내므로,
+           예외를 그냥 넘기면 폼이 화면에 멀쩡히 있는데도 None 이 되고 나중에
+           _pop_alert 로 확인해도 흔적이 없다 → '폼을 찾지 못했습니다'라는 거짓
+           사유가 남는다(바비톡: 401 마다 만료 alert 이 연달아 쌓임).
+           → 예외가 나면 같은 셀렉터를 다시 조회해 쌓인 alert 을 소진시킨다."""
         from selenium.webdriver.common.by import By
         for sel in selectors:
-            try:
-                for e in driver.find_elements(By.CSS_SELECTOR, sel):
-                    if e.is_displayed():
-                        return e
-            except Exception:
-                continue
+            for _ in range(6):          # 연달아 쌓인 alert 개수만큼만 재시도
+                try:
+                    for e in driver.find_elements(By.CSS_SELECTOR, sel):
+                        if e.is_displayed():
+                            return e
+                    break               # 정상 조회 — 이 셀렉터엔 없음
+                except Exception:
+                    time.sleep(0.2)     # alert 이 닫혔을 것 → 같은 셀렉터 재시도
         return None
+
+    @staticmethod
+    def _page_hint(driver) -> str:
+        """실패 사유에 붙일 현재 화면 요약 — 다른 PC 에서 난 실패를 로그만 보고
+        따라갈 수 있게 한다(어떤 화면이었는지, 입력칸이 정말 없었는지)."""
+        try:
+            n = driver.execute_script(
+                "var a=document.querySelectorAll('input');"
+                "return [a.length,"
+                " Array.prototype.filter.call(a,function(e){"
+                "   return e.offsetParent!==null;}).length,"
+                " document.readyState];")
+            return (f"url={(driver.current_url or '')[:60]} · "
+                    f"입력칸 {n[0]}개(보임 {n[1]}) · {n[2]}")
+        except Exception as e:
+            return f"화면 상태도 읽지 못함({type(e).__name__})"
 
     @staticmethod
     def _react_fill(driver, el, value) -> None:
@@ -831,13 +856,18 @@ class BaseChannel(ABC):
         값 주입 후 value 를 다시 읽어 확인하고, 반영이 안 됐으면 반대 방식으로 폴백한다."""
         id_in = self._first_visible(driver, self.ID_SELECTORS)
         pw = self._first_visible(driver, self.PW_SELECTORS)
+        blocked = ""
         if id_in is None or pw is None:
-            # ⚠️ '못 찾음'을 곧이곧대로 믿지 말 것. _first_visible 은 alert 이 떠 있어
-            #    명령이 막힌 경우까지 None 으로 뭉갠다(폼은 화면에 멀쩡히 있는데도).
-            #    실제로 이 메시지 때문에 '셀렉터가 깨졌나' 하고 한참 헤맸다.
-            blocked = self._pop_alert(driver)
+            # ⚠️ '못 찾음'을 곧이곧대로 믿지 말 것. alert 이 떠 있어 명령이 막힌 경우도
+            #    None 이 된다(폼은 화면에 멀쩡히 있는데도). 알림창을 치우고 한 번 더 본다.
+            blocked = self._pop_alert(driver, 1.5)
+            id_in = self._first_visible(driver, self.ID_SELECTORS)
+            pw = self._first_visible(driver, self.PW_SELECTORS)
+        if id_in is None or pw is None:
             self.login_error = (f"알림창이 막고 있었습니다: {' '.join(blocked.split())[:100]}"
-                                if blocked else "로그인 폼(아이디/비번 칸)을 찾지 못했습니다")
+                                if blocked else
+                                f"로그인 폼(아이디/비번 칸)을 찾지 못했습니다 "
+                                f"({self._page_hint(driver)})")
             return False
         first, second = ((self._key_fill, self._react_fill) if self.FILL_WITH_KEYS
                          else (self._react_fill, self._key_fill))
@@ -988,7 +1018,11 @@ class BaseChannel(ABC):
         #    login() 이 통째로 실패(=10분 백오프)했다. 정작 로그인 화면은 멀쩡한데
         #    '자동 로그인 실패'로 넘어가던 원인.
         self._pop_alert(driver)
-        self._goto_login_page(driver)
+        try:
+            self._goto_login_page(driver)
+        except Exception:               # 이동 도중 alert 이 튀어나온 경우 — 치우고 재시도
+            self._pop_alert(driver, 1.0)
+            self._goto_login_page(driver)
         self._pop_alert(driver, self.ALERT_SETTLE_SEC)   # 이동 뒤 늦게 뜨는 것까지
         try:                                # 로그인 폼이 그려질 때까지 대기
             WebDriverWait(driver, 20).until(
