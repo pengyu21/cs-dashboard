@@ -1,10 +1,10 @@
 {
-  "version": "1.0.14",
-  "notes": "바비톡 로그인 실패 원인 수정 — 만료 alert 이 쌓이면 로그인 폼을 못 찾던 문제(알림창을 치우고 재조회)",
+  "version": "1.0.15",
+  "notes": "바비톡 세션만료 자동로그인 수정(알림창 확인 처리 + 아이디칸 폴백)",
   "files": [
     {
       "name": "total.py",
-      "sha256": "161b6c93aeda2a4ac8530c4ac3ba700dd9c86967d796ee5c9eaca6891d582f7d"
+      "sha256": "c4b48b485dd09cbe63fd52118e12849f46d3522c06b1d88b14e42383757ec471"
     },
     {
       "name": "run_dashboard.py",

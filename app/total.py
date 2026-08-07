@@ -289,8 +289,18 @@ def _build_chrome(opts):
          WinError 5(액세스 거부)' 문제가 원천적으로 안 생긴다.
       2) 실패 시 webdriver_manager 폴백. 폴백 중 PermissionError(캐시 파일 잠김)면
          잠긴 .wdm 캐시를 지우고 1회 재시도한다.
+
+    ⚠️ unhandledPromptBehavior='ignore' 를 반드시 준다(실측으로 확인한 문제).
+       기본값은 'dismiss and notify' — alert 이 떠 있는 동안 들어온 첫 명령을
+       크롬드라이버가 '알림창을 취소로 닫고' 예외로 되돌린다. 그래서
+         · 우리가 '확인'을 누른 게 아니라 브라우저가 멋대로 '취소'를 누른 셈이 되고
+         · 그 알림창 문구도 사라져(_pop_alert 로 확인해도 흔적이 없다)
+           '로그인 폼을 찾지 못했습니다' 같은 엉뚱한 사유만 남는다.
+       'ignore' 면 알림창이 그대로 살아있어 우리가 문구를 읽고 '확인'을 누른다.
     """
     from selenium import webdriver
+
+    opts.set_capability("unhandledPromptBehavior", "ignore")
 
     try:                                   # 1) Selenium Manager (권장)
         return webdriver.Chrome(options=opts)
@@ -529,6 +539,25 @@ class BrowserHub:
             except Exception:
                 return
 
+    def _sweep_alerts(self) -> None:
+        """모든 탭을 돌며 열린 alert 을 '확인'으로 닫고 원래 탭으로 돌아온다.
+        드라이버가 unhandledPromptBehavior='ignore' 라 알림창은 우리가 닫아야만
+        사라진다 → 다른 탭에 알림창이 남아 그 탭 전환/조작이 계속 막히는 것을 막는다."""
+        try:
+            cur, handles = self.driver.current_window_handle, self.driver.window_handles
+        except Exception:
+            return
+        for h in handles:
+            try:
+                self.driver.switch_to.window(h)
+                self._accept_alert()
+            except Exception:
+                continue
+        try:
+            self.driver.switch_to.window(cur)
+        except Exception:
+            pass
+
     def _retry_on_alert(self, fn):
         """alert 때문에 막힌 호출은 alert 을 닫고 한 번 더 시도한다.
         세션 만료 안내는 페이지 로드가 끝난 '뒤에' 뜨기도 해서, 아무리 잘 닫아도
@@ -539,7 +568,11 @@ class BrowserHub:
             return fn()
         except UnexpectedAlertPresentException:
             self._accept_alert(1.0)
-            return fn()
+            try:
+                return fn()
+            except UnexpectedAlertPresentException:
+                self._sweep_alerts()        # 다른 탭에 남은 알림창까지 치우고 마지막 시도
+                return fn()
 
     def _ensure_tab(self, ch: "BaseChannel") -> None:
         """채널 탭으로 전환. 없거나 닫혔으면 빈 창 재활용 또는 새 탭 생성."""
@@ -567,7 +600,8 @@ class BrowserHub:
         with self.lock:
             self._accept_alert()                   # 이전 채널의 잔여 alert 정리(연쇄 차단 방지)
             try:
-                self._ensure_tab(ch)
+                # 탭 전환 자체가 알림창에 막힐 수 있다 → 치우고 재시도
+                self._retry_on_alert(lambda: self._ensure_tab(ch))
             except NoSuchWindowException:
                 self.tabs.pop(ch.key, None)
                 self._ensure_tab(ch)
@@ -653,6 +687,7 @@ class BaseChannel(ABC):
     LIST_URL: str = ""      # 상담 목록 페이지
     LOGIN_HELP: str = ""    # 로그인 실패 시 안내 문구(수동 로그인 방법 등)
     login_error: str = ""   # 마지막 자동 로그인 실패 사유(화면·시트 '비고'에 표시)
+    _lookup_note: str = ""  # 폼 조회가 막힌 이유(알림창 문구/예외명) — 사유 보고용
 
     # ── 팝업 닫기 ─────────────────────────────────────────────
     # ⚠️ 페이지 본문은 절대 클릭하지 않는다. '진짜 오버레이(모달/알림/드로어)'가
@@ -682,6 +717,7 @@ class BaseChannel(ABC):
         # 시트 1행에 추가로 쓸 셀(예: 잔액) {"E1": "...", "F1": "..."}. scrape 중 채움.
         self.header_cells: Dict[str, str] = {}
         self.login_error = ""       # 자동 로그인 실패 사유(어디서 막혔는지 남긴다)
+        self._lookup_note = ""      # 폼 조회가 막힌 이유(알림창/예외)
 
     # 외부 진입점: 데모면 가짜, 아니면 셀레니움 수집
     def collect(self) -> List[Consultation]:
@@ -742,17 +778,19 @@ class BaseChannel(ABC):
     FILL_WITH_KEYS = False      # True=실제 키 입력을 먼저(값 주입이 막히는 폼)
     FILL_PAUSE_SEC = 0.4        # 한 칸 입력 후 쉬는 시간(봇 탐지 완화용으로 늘림)
 
-    @staticmethod
-    def _first_visible(driver, selectors):
+    def _first_visible(self, driver, selectors):
         """CSS selectors 중 화면에 보이는 첫 요소. 없으면 None.
 
-        ⚠️ alert 이 떠 있으면 find_elements 가 예외를 낸다. 이때 chromedriver 는
-           기본값(dismiss and notify)대로 그 alert 을 '이미 닫은 뒤' 예외를 내므로,
-           예외를 그냥 넘기면 폼이 화면에 멀쩡히 있는데도 None 이 되고 나중에
-           _pop_alert 로 확인해도 흔적이 없다 → '폼을 찾지 못했습니다'라는 거짓
-           사유가 남는다(바비톡: 401 마다 만료 alert 이 연달아 쌓임).
-           → 예외가 나면 같은 셀렉터를 다시 조회해 쌓인 alert 을 소진시킨다."""
+        ⚠️ alert 이 떠 있으면 find_elements 가 예외를 낸다(바비톡: 401 마다 만료
+           alert 이 연달아 쌓임). 드라이버를 unhandledPromptBehavior='ignore' 로
+           띄우므로 알림창은 우리가 닫지 않는 한 그대로 살아있다 →
+           같은 셀렉터를 다시 조회해도 계속 막힌다.
+           → 막히면 '확인'을 눌러(=_pop_alert) 치운 뒤 다시 조회한다.
+             (사람이 하는 것과 같은 순서: 만료 팝업 확인 → 그다음 폼 조작)
+           왜 '문구를 기록'하나: 예전엔 예외를 통째로 삼켜서, 폼이 화면에 멀쩡히
+           있는데도 '폼을 찾지 못했습니다'라는 거짓 사유만 남았다."""
         from selenium.webdriver.common.by import By
+        self._lookup_note = ""
         for sel in selectors:
             for _ in range(6):          # 연달아 쌓인 alert 개수만큼만 재시도
                 try:
@@ -760,23 +798,36 @@ class BaseChannel(ABC):
                         if e.is_displayed():
                             return e
                     break               # 정상 조회 — 이 셀렉터엔 없음
-                except Exception:
-                    time.sleep(0.2)     # alert 이 닫혔을 것 → 같은 셀렉터 재시도
+                except Exception as ex:
+                    # 알림창에 막힌 것이면 '확인'을 눌러 치우고 재조회.
+                    msg = self._pop_alert(driver, 0.3)
+                    self._lookup_note = (f"알림창 '{' '.join(msg.split())[:60]}'" if msg
+                                         else f"{type(ex).__name__}")
+                    time.sleep(0.2)
         return None
 
     @staticmethod
     def _page_hint(driver) -> str:
         """실패 사유에 붙일 현재 화면 요약 — 다른 PC 에서 난 실패를 로그만 보고
-        따라갈 수 있게 한다(어떤 화면이었는지, 입력칸이 정말 없었는지)."""
+        따라갈 수 있게 한다(어떤 화면이었는지, 입력칸이 정말 없었는지).
+
+        ⚠️ '입력칸 2개(보임 2)' 처럼 개수만 남기면 아무 것도 진단할 수 없다.
+           (실제로 '폼을 못 찾았다'면서 '보임 2' 라고 적힌 알림이 왔는데,
+            그 2개가 우리 셀렉터에 안 걸리는 칸인지 알림창에 막혔던 것인지
+            구분이 안 됐다.) → 보이는 입력칸의 type/placeholder/class 를 함께 남긴다."""
         try:
             n = driver.execute_script(
                 "var a=document.querySelectorAll('input');"
-                "return [a.length,"
-                " Array.prototype.filter.call(a,function(e){"
-                "   return e.offsetParent!==null;}).length,"
-                " document.readyState];")
+                "var vis=Array.prototype.filter.call(a,function(e){"
+                "  return e.offsetParent!==null;});"
+                "return [a.length, vis.length, document.readyState,"
+                " vis.slice(0,4).map(function(e){"
+                "   return (e.getAttribute('type')||'(type없음)')"
+                "     +'/'+(e.placeholder||e.name||e.id||'-')"
+                "     +'/'+String(e.className||'-').slice(0,20);}).join(' , ')];")
             return (f"url={(driver.current_url or '')[:60]} · "
-                    f"입력칸 {n[0]}개(보임 {n[1]}) · {n[2]}")
+                    f"입력칸 {n[0]}개(보임 {n[1]}) · {n[2]}"
+                    + (f" · 보이는칸[{n[3]}]" if n[3] else ""))
         except Exception as e:
             return f"화면 상태도 읽지 못함({type(e).__name__})"
 
@@ -851,23 +902,73 @@ class BaseChannel(ABC):
         """제출 직전 채널별 추가 처리(자동로그인/로그인상태유지 체크 등)."""
         return
 
+    def _id_input_near_pw(self, driver):
+        """비번칸을 기준으로 '그 앞의 보이는 입력칸'을 아이디 칸으로 본다. 없으면 None.
+
+        왜 필요한가: ID_SELECTORS 는 placeholder('ID')·class('form-control') 같은
+        '사이트가 언제든 바꿀 수 있는 표식'에 의존한다. 하나만 바뀌어도 아이디 칸을
+        못 찾아 '폼을 찾지 못했습니다'로 죽는다(비번칸은 type=password 라 안 죽는다
+        → 매번 아이디 칸만 문제가 된다). 로그인 폼의 '비번칸 바로 위가 아이디 칸'
+        이라는 구조는 사이트가 개편돼도 잘 안 바뀌므로 이걸 마지막 그물로 쓴다.
+        체크박스(로그인 유지)·숨은 칸·검색창은 제외한다."""
+        try:
+            return driver.execute_script("""
+              var all=Array.prototype.slice.call(document.querySelectorAll('input'));
+              var pw=null;
+              for (var i=0;i<all.length;i++){
+                if(all[i].type==='password' && all[i].offsetParent!==null){pw=all[i];break;}}
+              if(!pw) return null;
+              var scope = pw.form || document;
+              var cands = Array.prototype.filter.call(scope.querySelectorAll('input'),
+                function(e){ return e!==pw && e.offsetParent!==null
+                  && !/^(password|checkbox|radio|hidden|submit|button|file|image)$/
+                       .test(e.type); });
+              var before = cands.filter(function(e){
+                return pw.compareDocumentPosition(e)
+                       & Node.DOCUMENT_POSITION_PRECEDING; });
+              return (before.length ? before[before.length-1] : cands[0]) || null;
+            """)
+        except Exception:
+            return None
+
+    def _find_login_inputs(self, driver):
+        """(아이디칸, 비번칸) 을 찾는다. 못 찾으면 해당 자리에 None.
+
+        순서: 알림창 치우기('확인') → 셀렉터 조회 → 아이디 칸은 구조 기반 폴백.
+        알림창은 401 마다 늦게 또 뜨므로 라운드마다 다시 치운다."""
+        blocked = self._pop_alert(driver, 1.0)
+        id_in = self._first_visible(driver, self.ID_SELECTORS)
+        note = self._lookup_note
+        pw = self._first_visible(driver, self.PW_SELECTORS)
+        note = note or self._lookup_note
+        if id_in is None and pw is not None:
+            id_in = self._id_input_near_pw(driver)      # 표식이 바뀐 경우의 마지막 그물
+            if id_in is not None:
+                print(f"[{self.name}] 아이디 칸을 셀렉터로 못 찾아 "
+                      f"'비번칸 기준 폴백'으로 찾았습니다 — 셀렉터 갱신 필요")
+        return id_in, pw, (blocked or note)
+
     def _fill_login_form(self, driver) -> bool:
         """아이디/비번을 '값이 실제로 들어간 상태'로 만든다. 실패 시 False.
         값 주입 후 value 를 다시 읽어 확인하고, 반영이 안 됐으면 반대 방식으로 폴백한다."""
-        id_in = self._first_visible(driver, self.ID_SELECTORS)
-        pw = self._first_visible(driver, self.PW_SELECTORS)
-        blocked = ""
+        # ⚠️ '못 찾음'을 곧이곧대로 믿지 말 것. 만료 alert 이 떠 있어 명령이 막힌
+        #    경우도 None 이 된다(폼은 화면에 멀쩡히 있는데도). 알림창을 확인으로
+        #    치우고 다시 보는 것을 3라운드 반복한다 — 만료 안내는 XHR 401 마다
+        #    새로 뜨기 때문에 '한 번 치우고 한 번 보기'로는 계속 어긋날 수 있다.
+        why = ""
+        for _ in range(3):
+            id_in, pw, note = self._find_login_inputs(driver)
+            why = note or why
+            if id_in is not None and pw is not None:
+                break
+            time.sleep(0.8)
         if id_in is None or pw is None:
-            # ⚠️ '못 찾음'을 곧이곧대로 믿지 말 것. alert 이 떠 있어 명령이 막힌 경우도
-            #    None 이 된다(폼은 화면에 멀쩡히 있는데도). 알림창을 치우고 한 번 더 본다.
-            blocked = self._pop_alert(driver, 1.5)
-            id_in = self._first_visible(driver, self.ID_SELECTORS)
-            pw = self._first_visible(driver, self.PW_SELECTORS)
-        if id_in is None or pw is None:
-            self.login_error = (f"알림창이 막고 있었습니다: {' '.join(blocked.split())[:100]}"
-                                if blocked else
-                                f"로그인 폼(아이디/비번 칸)을 찾지 못했습니다 "
-                                f"({self._page_hint(driver)})")
+            missing = ("아이디·비번 칸" if id_in is None and pw is None
+                       else "아이디 칸" if id_in is None else "비번 칸")
+            self.login_error = (f"로그인 폼({missing})을 찾지 못했습니다 "
+                                f"({self._page_hint(driver)}"
+                                + (f" · 막힌이유={' '.join(why.split())[:60]}" if why else "")
+                                + ")")
             return False
         first, second = ((self._key_fill, self._react_fill) if self.FILL_WITH_KEYS
                          else (self._react_fill, self._key_fill))
@@ -907,12 +1008,16 @@ class BaseChannel(ABC):
         from selenium.webdriver.common.by import By
         by_map = {"css": By.CSS_SELECTOR, "xpath": By.XPATH}
         for how, sel in tuple(self.EXTRA_LOGIN_BUTTONS) + tuple(self.LOGIN_BUTTON_SELECTORS):
-            try:
-                for e in driver.find_elements(by_map[how], sel):
-                    if e.is_displayed():
-                        return e
-            except Exception:
-                continue
+            for _ in range(3):
+                try:
+                    for e in driver.find_elements(by_map[how], sel):
+                        if e.is_displayed():
+                            return e
+                    break
+                except Exception:
+                    # 알림창에 막힌 것이면 '확인'을 눌러 치우고 재조회
+                    # (치우지 않으면 버튼이 멀쩡히 있는데도 '버튼을 찾지 못했습니다'가 된다)
+                    self._pop_alert(driver, 0.3)
         return None
 
     def _submit_login(self, driver) -> bool:
@@ -1736,10 +1841,12 @@ class NaverMapChannel(BaseChannel):
 
     def _fill_login_form(self, driver) -> bool:
         """네이버는 값 주입·빠른 타이핑이 봇으로 걸리므로 클립보드 붙여넣기를 쓴다."""
-        id_in = self._first_visible(driver, self.ID_SELECTORS)
-        pw_in = self._first_visible(driver, self.PW_SELECTORS)
+        id_in, pw_in, why = self._find_login_inputs(driver)
         if id_in is None or pw_in is None:
-            self.login_error = "로그인 폼(아이디/비번 칸)을 찾지 못했습니다"
+            self.login_error = (f"로그인 폼(아이디/비번 칸)을 찾지 못했습니다 "
+                                f"({self._page_hint(driver)}"
+                                + (f" · 막힌이유={' '.join(why.split())[:60]}" if why else "")
+                                + ")")
             return False
         self._paste(driver, id_in, self.USER_ID)
         time.sleep(2)
