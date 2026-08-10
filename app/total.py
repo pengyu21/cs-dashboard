@@ -466,10 +466,23 @@ class BrowserHub:
     LOGIN_BACKOFF_SEC = 10 * 60         # 로그인 실패 후 재시도 안 하는 시간(10분)
                                         # ※ 채널이 같은 이름의 값을 들고 있으면 그쪽 우선
                                         #   (바비톡처럼 '몇 분 뒤 재시도'가 정답인 사이트)
+    # 한 사이클 안에서 '새로고침 → 로그인 → 정말 됐는지 확인' 을 몇 번까지 돌지.
+    # 2 = 로그인해서 목록을 열었는데 여전히 미로그인이면 한 번 더 해본다.
+    # ※ '제출했다가 거부당한' 실패는 이 횟수와 무관하게 즉시 중단한다(계정 잠김 방지).
+    LOGIN_TRY_PER_CYCLE = 2
 
     def _backoff_sec(self, ch: "BaseChannel") -> float:
-        """이 채널의 로그인 실패 대기시간. 채널이 정해두지 않았으면 공통값(10분)."""
-        return float(getattr(ch, "LOGIN_BACKOFF_SEC", 0) or self.LOGIN_BACKOFF_SEC)
+        """이 채널의 로그인 실패 대기시간. 채널이 정해두지 않았으면 공통값(10분).
+
+        단, '로그인 버튼을 누르지도 못한' 실패(폼이 아직 안 그려짐, 화면 못 읽음 등)는
+        사이트에 실패 기록이 남지 않는다 → 계정 잠김과 무관하므로 길게 쉴 이유가 없다.
+        이때는 짧게(기본 30초) 쉬고 바로 다시 시도한다.
+        (실측: 폼 못 찾음 하나로 5분 30초씩 세 번을 쉬어 복구에 18분이 걸렸다.)"""
+        long_sec = float(getattr(ch, "LOGIN_BACKOFF_SEC", 0) or self.LOGIN_BACKOFF_SEC)
+        if getattr(ch, "login_attempted", True):
+            return long_sec
+        short = float(getattr(ch, "LOGIN_BACKOFF_SHORT_SEC", 0) or 30)
+        return min(short, long_sec)
 
     def __init__(self, headless: bool = False, persistent: bool = True):
         self.headless = headless
@@ -588,8 +601,35 @@ class BrowserHub:
             self.driver.switch_to.new_window("tab")
         self.tabs[ch.key] = self.driver.current_window_handle
 
+    def _open_list(self, ch: "BaseChannel") -> None:
+        """목록 페이지를 완전 재로드하고, 늦게 뜨는 알림창/팝업까지 치운다."""
+        self.driver.get(ch.LIST_URL)               # 새로고침 대신 완전 재로드
+        # 미로그인/세션만료 등 늦게 뜨는 alert까지 대기해서 닫음.
+        # 채널이 더 긴 창을 요구하면(ALERT_SETTLE_SEC) 그만큼 기다린다.
+        self._accept_alert(max(2.0, getattr(ch, "ALERT_SETTLE_SEC", 0.0)))
+        ch.dismiss_popups(self.driver)
+
+    def _login_fail(self, ch: "BaseChannel", why: str = "") -> RuntimeError:
+        """로그인 실패 확정 — 백오프를 걸고 화면에 띄울 예외를 만든다."""
+        wait_sec = self._backoff_sec(ch)
+        self._backoff[ch.key] = time.monotonic() + wait_sec
+        hint = f" | 수동 로그인: {ch.LOGIN_HELP}" if ch.LOGIN_HELP else ""
+        why = why or getattr(ch, "login_error", "") or ""
+        m, s = divmod(int(wait_sec), 60)
+        when = (f"{m}분" + (f" {s}초" if s else "")) if m else f"{s}초"
+        return RuntimeError(f"자동 로그인 실패 — {when} 뒤 다시 시도"
+                            + (f" ({why})" if why else "") + hint)
+
     def collect(self, ch: "BaseChannel") -> list:
         """탭 재로드 + 로그인 보장 + 스크랩. 실패 시 예외를 올린다(시트 보호).
+
+        '로그아웃 상태면 → 새로고침 → 로그인 → 정말 됐는지 다시 확인' 을
+        LOGIN_TRY_PER_CYCLE 번까지 한 사이클 안에서 돈다. 로그인했다고 넘어갔다가
+        정작 목록이 안 열려 엉뚱한 스크랩 오류로 끝나는 일을 막는다.
+
+        ⚠️ 단, '아이디/비번을 실제로 제출했는데 거부당한' 실패는 그 자리에서
+           다시 시도하지 않는다(사이트의 연속 실패 카운터 → 계정 잠김).
+           화면이 안 그려져 제출도 못 해본 실패만 곧장 새로고침해 다시 한다.
 
         백오프 중이어도 페이지를 열어 로그인 상태 '확인'은 한다:
           · 그 사이 수동 로그인이 됐으면 → 백오프 즉시 해제하고 수집(화면 바로 반영)
@@ -606,39 +646,40 @@ class BrowserHub:
                 self.tabs.pop(ch.key, None)
                 self._ensure_tab(ch)
 
-            self.driver.get(ch.LIST_URL)           # 새로고침 대신 완전 재로드
-            # 미로그인/세션만료 등 늦게 뜨는 alert까지 대기해서 닫음.
-            # 채널이 더 긴 창을 요구하면(ALERT_SETTLE_SEC) 그만큼 기다린다.
-            self._accept_alert(max(2.0, getattr(ch, "ALERT_SETTLE_SEC", 0.0)))
-            ch.dismiss_popups(self.driver)
-            if not self._retry_on_alert(lambda: ch.is_logged_in(self.driver)):
+            self._open_list(ch)
+            tries = 0                              # 실제로 login() 을 부른 횟수
+            while not self._retry_on_alert(lambda: ch.is_logged_in(self.driver)):
                 # 백오프 중이면 재로그인은 시도하지 않고 남은 시간만큼 건너뜀
                 # (수동 로그인은 위 is_logged_in 통과로 이미 걸러졌으니 여기 안 옴)
                 until = self._backoff.get(ch.key, 0.0)
                 if until and time.monotonic() < until:
-                    mins = int((until - time.monotonic()) / 60) + 1
-                    raise RuntimeError(f"로그인 실패 백오프 중 — 약 {mins}분 후 재시도")
+                    left = int(until - time.monotonic()) + 1
+                    when = (f"약 {left // 60 + 1}분" if left >= 60 else f"{left}초")
+                    raise RuntimeError(f"로그인 실패 백오프 중 — {when} 후 재시도")
+                if tries >= self.LOGIN_TRY_PER_CYCLE:
+                    # 로그인은 됐다는데 목록이 계속 미로그인 → 다음 사이클에 다시
+                    raise self._login_fail(
+                        ch, "로그인 후에도 목록이 미로그인 상태로 나옵니다")
 
-                print(f"[{ch.name}] 세션 만료 → 재로그인")
+                tries += 1
+                print(f"[{ch.name}] 세션 만료 → 재로그인 "
+                      f"({tries}/{self.LOGIN_TRY_PER_CYCLE})")
                 try:
                     ok = self._retry_on_alert(lambda: ch.login(self.driver))
                 except Exception as e:
                     ok = False                     # 로그인 중 예외도 실패로 처리
                     ch.login_error = ch.login_error or classify_error(e).detail
-                if not ok:
-                    # 실패(캡챠/입력오류 등) → 백오프(반복 로그인 시도 차단) + 안내
-                    wait_sec = self._backoff_sec(ch)
-                    self._backoff[ch.key] = time.monotonic() + wait_sec
-                    hint = f" | 수동 로그인: {ch.LOGIN_HELP}" if ch.LOGIN_HELP else ""
-                    why = getattr(ch, "login_error", "") or ""
-                    m, s = divmod(int(wait_sec), 60)
-                    when = f"{m}분" + (f" {s}초" if s else "")
-                    raise RuntimeError(
-                        f"자동 로그인 실패 — {when} 뒤 다시 시도"
-                        + (f" ({why})" if why else "") + hint)
-                self.driver.get(ch.LIST_URL)
-                self._accept_alert(max(2.0, getattr(ch, "ALERT_SETTLE_SEC", 0.0)))
-                ch.dismiss_popups(self.driver)
+                if ok:
+                    self._open_list(ch)            # 목록을 다시 열고 위에서 재확인
+                    continue
+                # 제출까지 갔다가 거부당했으면(비번 오류·캡챠 등) 여기서 멈춘다.
+                # 제출도 못 해본 실패(폼이 안 그려짐 등)만 새로고침하고 곧장 다시.
+                if (tries >= self.LOGIN_TRY_PER_CYCLE
+                        or getattr(ch, "login_attempted", True)):
+                    raise self._login_fail(ch)
+                print(f"[{ch.name}] 로그인 화면이 준비되지 않음 "
+                      f"({ch.login_error}) — 새로고침하고 곧장 다시 시도")
+                self._open_list(ch)
             self._backoff.pop(ch.key, None)        # 로그인 정상(수동 포함) → 백오프 해제
             return ch.scrape(self.driver)
 
@@ -688,6 +729,10 @@ class BaseChannel(ABC):
     LOGIN_HELP: str = ""    # 로그인 실패 시 안내 문구(수동 로그인 방법 등)
     login_error: str = ""   # 마지막 자동 로그인 실패 사유(화면·시트 '비고'에 표시)
     _lookup_note: str = ""  # 폼 조회가 막힌 이유(알림창 문구/예외명) — 사유 보고용
+    # 이번 로그인에서 '제출(로그인 클릭)'까지 갔는가.
+    # False = 사이트엔 아무 흔적도 안 남은 실패(폼이 아직 안 그려짐 등)
+    #   → 오래 쉴 이유가 없다(짧은 백오프). 기본값은 안전하게 True(모르면 길게 쉼).
+    login_attempted: bool = True
 
     # ── 팝업 닫기 ─────────────────────────────────────────────
     # ⚠️ 페이지 본문은 절대 클릭하지 않는다. '진짜 오버레이(모달/알림/드로어)'가
@@ -718,6 +763,7 @@ class BaseChannel(ABC):
         self.header_cells: Dict[str, str] = {}
         self.login_error = ""       # 자동 로그인 실패 사유(어디서 막혔는지 남긴다)
         self._lookup_note = ""      # 폼 조회가 막힌 이유(알림창/예외)
+        self.login_attempted = True  # '제출까지 갔는지' — 실패 시 백오프 길이를 가른다
 
     # 외부 진입점: 데모면 가짜, 아니면 셀레니움 수집
     def collect(self) -> List[Consultation]:
@@ -777,6 +823,14 @@ class BaseChannel(ABC):
                           "비밀번호를", "다시 입력", "실패")
     FILL_WITH_KEYS = False      # True=실제 키 입력을 먼저(값 주입이 막히는 폼)
     FILL_PAUSE_SEC = 0.4        # 한 칸 입력 후 쉬는 시간(봇 탐지 완화용으로 늘림)
+    # 폼이 아직 안 그려졌을 때: '새로고침 → 다시 보기'를 이만큼 반복한다.
+    # 클릭(제출)은 하지 않으므로 사이트의 '연속 로그인 실패' 카운터와 무관하다
+    # → 몇 번 더 새로고침해도 계정이 잠기지 않는다.
+    LOGIN_PAGE_RETRY = 3
+    LOGIN_RELOAD_WAIT_SEC = 1.5     # 새로고침 전에 잠깐 쉼(렌더 여유)
+    # 제출을 '한 번도 못 해본' 실패(폼/버튼 못 찾음 등)는 사이트에 아무 흔적이 없다
+    # → 길게 쉴 이유가 없다. 이만큼만 쉬고 바로 다시 시도한다.
+    LOGIN_BACKOFF_SHORT_SEC = 30
 
     def _first_visible(self, driver, selectors):
         """CSS selectors 중 화면에 보이는 첫 요소. 없으면 None.
@@ -804,7 +858,53 @@ class BaseChannel(ABC):
                     self._lookup_note = (f"알림창 '{' '.join(msg.split())[:60]}'" if msg
                                          else f"{type(ex).__name__}")
                     time.sleep(0.2)
-        return None
+        # 셀레니움이 '없다'고 해도 브라우저에 직접 물어본다(마지막 그물).
+        el = self._visible_by_js(driver, tuple(("css", s) for s in selectors))
+        if el is not None:
+            self._lookup_note = "is_displayed()=False (브라우저 판정으로 찾음)"
+            print(f"[{self.name}] is_displayed() 로는 못 찾은 칸을 "
+                  f"브라우저 판정(JS)으로 찾았습니다 — 그대로 진행")
+        return el
+
+    @staticmethod
+    def _visible_by_js(driver, pairs):
+        """브라우저에게 직접 물어 '보이는 첫 요소'를 받아온다. 없으면 None.
+        pairs = (("css"|"xpath", 셀렉터), ...) — 위에서부터 순서대로 본다.
+
+        왜 필요한가(실측): 바비톡 /login 에서 셀레니움 is_displayed() 만 False 로
+        나와 '로그인 폼을 찾지 못했습니다'로 죽는 일이 있었다. 같은 순간에 찍힌
+        진단 문구는 '입력칸 2개(보임 2) · 보이는칸[text/ID/form-control ,
+        password/비밀번호/form-control]' — 화면엔 멀쩡히 있었다는 뜻이다.
+        (렌더 타이밍·오버레이·애니메이션 등으로 is_displayed() 가 틀릴 수 있다.)
+        → 사람 눈과 같은 기준(레이아웃 상자가 있고 숨김 스타일이 아님)으로 다시 본다.
+          position:fixed 는 offsetParent 가 null 이라 예외 처리한다."""
+        try:
+            return driver.execute_script("""
+              var pairs = arguments[0];
+              function vis(e){
+                if(!e) return false;
+                var st = window.getComputedStyle(e);
+                if(st.visibility === 'hidden' || st.display === 'none') return false;
+                if(e.offsetParent === null && st.position !== 'fixed') return false;
+                var r = e.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+              }
+              for (var i=0;i<pairs.length;i++){
+                var how = pairs[i][0], sel = pairs[i][1], els = [];
+                try {
+                  if (how === 'xpath'){
+                    var it = document.evaluate(sel, document, null, 7, null);
+                    for (var k=0;k<it.snapshotLength;k++) els.push(it.snapshotItem(k));
+                  } else {
+                    els = Array.prototype.slice.call(document.querySelectorAll(sel));
+                  }
+                } catch(err) { continue; }
+                for (var j=0;j<els.length;j++) if (vis(els[j])) return els[j];
+              }
+              return null;
+            """, [list(p) for p in pairs])
+        except Exception:
+            return None
 
     @staticmethod
     def _page_hint(driver) -> str:
@@ -814,19 +914,31 @@ class BaseChannel(ABC):
         ⚠️ '입력칸 2개(보임 2)' 처럼 개수만 남기면 아무 것도 진단할 수 없다.
            (실제로 '폼을 못 찾았다'면서 '보임 2' 라고 적힌 알림이 왔는데,
             그 2개가 우리 셀렉터에 안 걸리는 칸인지 알림창에 막혔던 것인지
-            구분이 안 됐다.) → 보이는 입력칸의 type/placeholder/class 를 함께 남긴다."""
+            구분이 안 됐다.) → 보이는 입력칸의 type/placeholder/class 를 함께 남긴다.
+
+        ⚠️ '보임' 을 offsetParent 하나로 세면 안 된다 — visibility:hidden / 크기 0 인
+           칸도 '보임' 으로 세어져(실측 확인) '화면엔 멀쩡한데 왜 못 찾지?' 하는
+           엉뚱한 진단으로 이어진다. → 숨김 스타일·상자 크기까지 본 '진짜보임' 을
+           따로 센다. 둘이 다르면 그게 곧 원인(그려지다 만 화면)이다."""
         try:
             n = driver.execute_script(
                 "var a=document.querySelectorAll('input');"
-                "var vis=Array.prototype.filter.call(a,function(e){"
-                "  return e.offsetParent!==null;});"
+                "function laid(e){return e.offsetParent!==null"
+                "  || getComputedStyle(e).position==='fixed';}"
+                "function real(e){var s=getComputedStyle(e);"
+                "  if(s.visibility==='hidden'||s.display==='none') return false;"
+                "  var r=e.getBoundingClientRect();"
+                "  return laid(e) && r.width>0 && r.height>0;}"
+                "var vis=Array.prototype.filter.call(a,laid);"
+                "var hard=Array.prototype.filter.call(a,real);"
                 "return [a.length, vis.length, document.readyState,"
                 " vis.slice(0,4).map(function(e){"
                 "   return (e.getAttribute('type')||'(type없음)')"
                 "     +'/'+(e.placeholder||e.name||e.id||'-')"
-                "     +'/'+String(e.className||'-').slice(0,20);}).join(' , ')];")
+                "     +'/'+String(e.className||'-').slice(0,20)"
+                "     +(real(e)?'':'/숨김');}).join(' , '), hard.length];")
             return (f"url={(driver.current_url or '')[:60]} · "
-                    f"입력칸 {n[0]}개(보임 {n[1]}) · {n[2]}"
+                    f"입력칸 {n[0]}개(보임 {n[1]}/진짜보임 {n[4]}) · {n[2]}"
                     + (f" · 보이는칸[{n[3]}]" if n[3] else ""))
         except Exception as e:
             return f"화면 상태도 읽지 못함({type(e).__name__})"
@@ -1018,7 +1130,9 @@ class BaseChannel(ABC):
                     # 알림창에 막힌 것이면 '확인'을 눌러 치우고 재조회
                     # (치우지 않으면 버튼이 멀쩡히 있는데도 '버튼을 찾지 못했습니다'가 된다)
                     self._pop_alert(driver, 0.3)
-        return None
+        # 입력칸과 같은 이유로, is_displayed() 가 틀린 경우를 대비한 마지막 그물
+        return self._visible_by_js(
+            driver, tuple(self.EXTRA_LOGIN_BUTTONS) + tuple(self.LOGIN_BUTTON_SELECTORS))
 
     def _submit_login(self, driver) -> bool:
         """'로그인' 버튼을 실제로 누른다(눌렀으면 True).
@@ -1112,11 +1226,11 @@ class BaseChannel(ABC):
                 continue
         return ""
 
-    def _do_login_flow(self, driver) -> bool:
-        """공통 자동 로그인: 이동 → 입력 → 클릭(폴백) → 결과 확인 → 재클릭."""
+    def _open_login_page(self, driver) -> bool:
+        """로그인 화면을 열고(=새로고침 포함) 폼이 그려질 때까지 기다린다.
+        반환 True = '이미 로그인돼 있다'(로그인 화면이 우리를 튕겨냈다)."""
         from selenium.webdriver.support.ui import WebDriverWait
 
-        self.login_error = ""
         # ⚠️ 순서 주의 — alert 을 '이동보다 먼저' 치운다.
         #    예전엔 _goto_login_page() 가 먼저였는데, 세션 만료 alert 이 떠 있으면
         #    그 안의 driver.get() 이 UnexpectedAlertPresentException 으로 터져
@@ -1135,18 +1249,56 @@ class BaseChannel(ABC):
                 or not self._at_login_page(d))
         except Exception:
             pass
-        if (not self._at_login_page(driver)
-                and self._first_visible(driver, self.PW_SELECTORS) is None):
+        return (not self._at_login_page(driver)
+                and self._first_visible(driver, self.PW_SELECTORS) is None)
+
+    def _fill_or_reload(self, driver) -> str:
+        """폼을 채운다. 아직 안 그려졌으면 '새로고침 후 다시' 를 몇 번 더 해본다.
+        반환: "ok"(채움) / "already"(그 사이 로그인돼 있었음) / "fail"(끝내 못 채움).
+
+        왜 이렇게: 폼을 못 찾았다고 곧장 실패로 끝내면, 화면이 조금 늦게 그려졌을
+        뿐인데도 백오프(수 분)를 타고 그만큼 수집이 멈춘다. 사람이라면 그냥
+        새로고침 한 번 더 하고 진행한다 — 클릭(제출)은 안 하므로 계정도 안전하다."""
+        for attempt in range(1, self.LOGIN_PAGE_RETRY + 1):
+            if self._fill_login_form(driver):
+                self.login_error = ""       # 앞선 시도의 사유는 지운다(해결됨)
+                return "ok"
+            if attempt >= self.LOGIN_PAGE_RETRY:
+                return "fail"
+            print(f"[{self.name}] 로그인 폼 준비 안 됨 — 새로고침 후 재시도 "
+                  f"({attempt}/{self.LOGIN_PAGE_RETRY - 1}) · {self.login_error}")
+            time.sleep(self.LOGIN_RELOAD_WAIT_SEC)
+            try:
+                if self._open_login_page(driver):
+                    return "already"        # 새로고침해 보니 이미 로그인 상태
+            except Exception as e:
+                self.login_error = f"로그인 화면 새로고침 실패({type(e).__name__})"
+        return "fail"
+
+    def _do_login_flow(self, driver) -> bool:
+        """공통 자동 로그인: 이동 → 입력(안 되면 새로고침 재시도) → 클릭(폴백)
+        → 결과 확인 → 재클릭."""
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        self.login_error = ""
+        self.login_attempted = False        # 아직 '제출'은 안 했다(짧은 백오프 판단용)
+        if self._open_login_page(driver):
             return True                     # 이미 로그인됨(로그인 페이지가 튕겨냄)
 
         for i in range(1, self.LOGIN_SUBMIT_RETRY + 1):
-            if not self._fill_login_form(driver):
+            filled = self._fill_or_reload(driver)
+            if filled == "already":
+                print(f"[{self.name}] 새로고침해 보니 이미 로그인 상태 — 그대로 진행")
+                self.login_error = ""
+                return True
+            if filled != "ok":
                 print(f"[{self.name}] 로그인 입력 실패 — {self.login_error}")
                 return False
             self._prepare_submit(driver)
             if not self._submit_login(driver):
                 print(f"[{self.name}] 로그인 클릭 실패 — {self.login_error}")
                 return False
+            self.login_attempted = True     # 여기서부터는 사이트에 흔적이 남는다
             print(f"[{self.name}] '로그인' 클릭 {i}/{self.LOGIN_SUBMIT_RETRY} — 결과 대기")
             # ⚠️ 순서 주의 — 결과 alert 을 '기다리기보다 먼저' 읽는다.
             #    chromedriver 기본값(dismiss and notify)은 alert 이 떠 있는 동안
