@@ -587,6 +587,53 @@ class BrowserHub:
                 self._sweep_alerts()        # 다른 탭에 남은 알림창까지 치우고 마지막 시도
                 return fn()
 
+    def _focus_tab(self, ch: "BaseChannel") -> bool:
+        """이 채널 탭으로 포커스를 되돌린다(다른 탭을 만지다 튄 경우 대비).
+
+        _sweep_alerts() 는 알림창을 치우려고 모든 탭을 순회한다 — 그 사이 포커스가
+        네이버지도 탭 등으로 옮겨간 채 돌아오지 못하면, 이후 명령이 엉뚱한 탭에
+        나가 '로그인이 안 됐는데 다음 탭으로 넘어간' 것처럼 보인다."""
+        h = self.tabs.get(ch.key)
+        try:
+            if h and h in self.driver.window_handles:
+                if self.driver.current_window_handle != h:
+                    self.driver.switch_to.window(h)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _try_login(self, ch: "BaseChannel") -> bool:
+        """로그인 1회 시도. '알림창에 막혔다고 login() 을 통째로 다시 돌리지' 않는다.
+
+        예전엔 _retry_on_alert(ch.login) 으로 감쌌다. 그러면 로그인 도중 알림창이
+        하나 뜨는 것만으로
+          (1) 이미 눌린 '로그인'을 처음부터 다시 눌러 — 바비톡은 한 사이클 1회만
+              누르도록 맞춰뒀는데도 최대 3회가 나갔다(5회면 5분 차단 → 자초),
+          (2) 마지막 폴백인 _sweep_alerts() 가 모든 탭을 돌며 포커스를 네이버지도
+              탭까지 옮겨, 정작 바비톡 로그인이 끝나기도 전에 화면이 넘어갔다.
+        → 알림창에 막히면 그 탭에서 알림만 치우고, '클릭이 이미 통했는지'를
+          먼저 확인한다. 제출 전이었을 때만 한 번 더 시도한다."""
+        from selenium.common.exceptions import UnexpectedAlertPresentException
+        try:
+            return ch.login(self.driver)
+        except UnexpectedAlertPresentException:
+            self._accept_alert(1.0)
+            self._focus_tab(ch)             # 알림 처리로 포커스가 튀었으면 되돌린다
+            try:
+                if ch.is_logged_in(self.driver):
+                    ch.login_error = ""
+                    print(f"[{ch.name}] 알림창 처리 중 로그인 완료 확인 — 그대로 진행")
+                    return True
+            except Exception:
+                pass
+            if getattr(ch, "login_attempted", True):
+                # 이미 제출까지 갔다 → 다시 누르지 않는다(연속 실패 → 계정 잠김)
+                ch.login_error = (ch.login_error
+                                  or "로그인 제출 뒤 알림창으로 확인이 끊겼습니다")
+                return False
+            return ch.login(self.driver)    # 제출 전이었으면 한 번만 다시
+
     def _ensure_tab(self, ch: "BaseChannel") -> None:
         """채널 탭으로 전환. 없거나 닫혔으면 빈 창 재활용 또는 새 탭 생성."""
         h = self.tabs.get(ch.key)
@@ -648,7 +695,12 @@ class BrowserHub:
 
             self._open_list(ch)
             tries = 0                              # 실제로 login() 을 부른 횟수
+            # 한 사이클에 login() 을 몇 번까지 부를지 — 채널이 정해두면 그쪽 우선.
+            # (바비톡은 1: 연타가 곧 계정 차단이라 '한 사이클 한 번'이 원칙)
+            max_try = int(getattr(ch, "LOGIN_TRY_PER_CYCLE", 0)
+                          or self.LOGIN_TRY_PER_CYCLE)
             while not self._retry_on_alert(lambda: ch.is_logged_in(self.driver)):
+                self._focus_tab(ch)                # 알림 순회로 튄 포커스 복구
                 # 백오프 중이면 재로그인은 시도하지 않고 남은 시간만큼 건너뜀
                 # (수동 로그인은 위 is_logged_in 통과로 이미 걸러졌으니 여기 안 옴)
                 until = self._backoff.get(ch.key, 0.0)
@@ -656,26 +708,25 @@ class BrowserHub:
                     left = int(until - time.monotonic()) + 1
                     when = (f"약 {left // 60 + 1}분" if left >= 60 else f"{left}초")
                     raise RuntimeError(f"로그인 실패 백오프 중 — {when} 후 재시도")
-                if tries >= self.LOGIN_TRY_PER_CYCLE:
+                if tries >= max_try:
                     # 로그인은 됐다는데 목록이 계속 미로그인 → 다음 사이클에 다시
                     raise self._login_fail(
                         ch, "로그인 후에도 목록이 미로그인 상태로 나옵니다")
 
                 tries += 1
-                print(f"[{ch.name}] 세션 만료 → 재로그인 "
-                      f"({tries}/{self.LOGIN_TRY_PER_CYCLE})")
+                print(f"[{ch.name}] 세션 만료 → 재로그인 ({tries}/{max_try})")
                 try:
-                    ok = self._retry_on_alert(lambda: ch.login(self.driver))
+                    ok = self._try_login(ch)
                 except Exception as e:
                     ok = False                     # 로그인 중 예외도 실패로 처리
                     ch.login_error = ch.login_error or classify_error(e).detail
+                self._focus_tab(ch)                # 무슨 일이 있었든 이 채널 탭으로
                 if ok:
                     self._open_list(ch)            # 목록을 다시 열고 위에서 재확인
                     continue
                 # 제출까지 갔다가 거부당했으면(비번 오류·캡챠 등) 여기서 멈춘다.
                 # 제출도 못 해본 실패(폼이 안 그려짐 등)만 새로고침하고 곧장 다시.
-                if (tries >= self.LOGIN_TRY_PER_CYCLE
-                        or getattr(ch, "login_attempted", True)):
+                if tries >= max_try or getattr(ch, "login_attempted", True):
                     raise self._login_fail(ch)
                 print(f"[{ch.name}] 로그인 화면이 준비되지 않음 "
                       f"({ch.login_error}) — 새로고침하고 곧장 다시 시도")
@@ -733,6 +784,8 @@ class BaseChannel(ABC):
     # False = 사이트엔 아무 흔적도 안 남은 실패(폼이 아직 안 그려짐 등)
     #   → 오래 쉴 이유가 없다(짧은 백오프). 기본값은 안전하게 True(모르면 길게 쉼).
     login_attempted: bool = True
+    # 로그인 확인 도중 '계정 거부' alert 을 봤는가(= 다시 눌러선 안 되는 실패).
+    _login_rejected: bool = False
 
     # ── 팝업 닫기 ─────────────────────────────────────────────
     # ⚠️ 페이지 본문은 절대 클릭하지 않는다. '진짜 오버레이(모달/알림/드로어)'가
@@ -764,6 +817,7 @@ class BaseChannel(ABC):
         self.login_error = ""       # 자동 로그인 실패 사유(어디서 막혔는지 남긴다)
         self._lookup_note = ""      # 폼 조회가 막힌 이유(알림창/예외)
         self.login_attempted = True  # '제출까지 갔는지' — 실패 시 백오프 길이를 가른다
+        self._login_rejected = False  # 확인 중 '계정 거부' alert 을 봤는지
 
     # 외부 진입점: 데모면 가짜, 아니면 셀레니움 수집
     def collect(self) -> List[Consultation]:
@@ -814,6 +868,8 @@ class BaseChannel(ABC):
     LOGIN_URL_MARK = "/login"   # URL 에 이 문구가 있으면 '아직 로그인 화면'
     LOGIN_SUBMIT_RETRY = 3      # 클릭이 씹혀 폼이 남을 때 재클릭 횟수
     LOGIN_WAIT_SEC = 15         # 클릭 후 로그인 완료까지 대기(초)
+    LOGIN_CONFIRM_POLL_SEC = 0.6  # '정말 로그인됐나' 확인 폴링 간격(초)
+    LOGIN_CONFIRM_SWEEP_SEC = 3.0  # 확인 도중 공지 팝업을 걷어내는 간격(초)
     POST_SUBMIT_ALERT_SEC = 0.0  # 클릭 직후 '결과 alert' 을 먼저 읽는 시간(초)
                                  # >0 이면 로그인 결과를 alert 으로만 알려주는 사이트용
     # 이 문구가 alert 에 들어 있으면 '계정 거부' — 재클릭해도 소용없고,
@@ -1005,6 +1061,58 @@ class BaseChannel(ABC):
             return self.LOGIN_URL_MARK.lower() in (driver.current_url or "").lower()
         except Exception:
             return True                 # URL 조차 못 읽으면 넘어가지 못한 것으로 본다
+
+    def _logged_in_now(self, driver) -> bool:
+        """'지금 이 순간' 로그인돼 있는가 — 기다리지 않는 즉답 판정.
+
+        is_logged_in() 은 SPA 정착을 십수 초 기다리므로 폴링에 쓸 수 없다.
+        기본 판정 = 로그인 화면을 벗어났고(URL 표식) + 비밀번호 칸이 안 남아 있다.
+        '주소만 먼저 바뀌고 폼은 그대로'인 SPA 를 성공으로 오판하지 않으려는 것.
+        더 확실한 표식이 있는 채널은 override 한다."""
+        if self._at_login_page(driver):
+            return False
+        try:
+            return self._first_visible(driver, self.PW_SELECTORS) is None
+        except Exception:
+            return False
+
+    def _login_confirmed(self, driver, timeout: float = 0.0) -> bool:
+        """로그인이 '정말' 됐는지 확인될 때까지 지켜본다(확인되면 True).
+
+        왜 필요한가(실측 — 바비톡): 로그인 화면에 공지/안내 팝업이 순식간에 뜬다.
+        예전엔 클릭 뒤 'URL 에서 /login 이 사라졌나' 하나만 봤기 때문에,
+        팝업이 전환을 잠깐 가리기만 해도 '넘어가지 못했다'로 끝나 5분 30초
+        백오프를 탔다. 반대로 주소만 먼저 바뀌는 순간엔 아직 폼이 남아 있는데도
+        성공으로 보고 다음 순서(네이버지도 탭)로 넘어가 버렸다.
+        → 매 라운드 [알림창 확인 → 팝업 닫기 → 즉답 판정] 을 돌려서
+          '로그인됐다'가 확인될 때까지는 이 탭을 떠나지 않는다.
+
+        도중에 '계정 거부' alert(비번 오류 등)이 뜨면 즉시 멈추고
+        self._login_rejected 를 세운다 — 더 눌러봐야 계정만 잠긴다."""
+        self._login_rejected = False
+        end = time.monotonic() + max(0.0, timeout or self.LOGIN_WAIT_SEC)
+        next_sweep = 0.0                # 팝업 청소는 몇 초에 한 번만(과도한 클릭 방지)
+        while True:
+            msg = self._pop_alert(driver)
+            if msg and self._note_alert(msg):       # 거부 alert → 확인 중단
+                self._login_rejected = True
+                return False
+            if time.monotonic() >= next_sweep:
+                try:
+                    self.dismiss_popups(driver)     # 전환을 가리는 공지 팝업 제거
+                except Exception:
+                    pass
+                # 네이버·카카오는 사람이 캡챠/앱승인을 푸는 동안(최대 150초) 여기 머문다.
+                # 그 시간 내내 오버레이를 훑어 누르지 않도록 간격을 둔다.
+                next_sweep = time.monotonic() + self.LOGIN_CONFIRM_SWEEP_SEC
+            try:
+                if self._logged_in_now(driver):
+                    return True
+            except Exception:
+                pass
+            if time.monotonic() >= end:
+                return False
+            time.sleep(self.LOGIN_CONFIRM_POLL_SEC)
 
     def _goto_login_page(self, driver) -> None:
         """로그인 화면으로 이동. 홈에서 '로그인'을 눌러야 하는 채널은 override."""
@@ -1278,8 +1386,6 @@ class BaseChannel(ABC):
     def _do_login_flow(self, driver) -> bool:
         """공통 자동 로그인: 이동 → 입력(안 되면 새로고침 재시도) → 클릭(폴백)
         → 결과 확인 → 재클릭."""
-        from selenium.webdriver.support.ui import WebDriverWait
-
         self.login_error = ""
         self.login_attempted = False        # 아직 '제출'은 안 했다(짧은 백오프 판단용)
         if self._open_login_page(driver):
@@ -1294,6 +1400,13 @@ class BaseChannel(ABC):
             if filled != "ok":
                 print(f"[{self.name}] 로그인 입력 실패 — {self.login_error}")
                 return False
+            # 누르기 직전에 오버레이를 한 번 걷어낸다 — 공지 팝업이 '로그인' 버튼을
+            # 덮고 있으면 클릭이 팝업에 먹혀 폼만 남고(=클릭이 씹힌 것처럼 보임)
+            # 그대로 '넘어가지 못했습니다'로 끝난다.
+            try:
+                self.dismiss_popups(driver)
+            except Exception:
+                pass
             self._prepare_submit(driver)
             if not self._submit_login(driver):
                 print(f"[{self.name}] 로그인 클릭 실패 — {self.login_error}")
@@ -1310,18 +1423,15 @@ class BaseChannel(ABC):
             #    카운터를 우리 손으로 채워 계정이 잠기는 악순환이 돌았다.
             if self._note_alert(self._pop_alert(driver, self.POST_SUBMIT_ALERT_SEC)):
                 return False                # 거부 alert → 재클릭 금지
-            try:                            # 로그인 완료(=로그인 화면 이탈) 대기
-                WebDriverWait(driver, self.LOGIN_WAIT_SEC).until(
-                    lambda d: not self._at_login_page(d))
-            except Exception:
-                pass
-            if self._note_alert(self._pop_alert(driver)):   # 뒤늦게 뜨는 알림창
-                return False
-            if not self._at_login_page(driver):
+            # 로그인 '완료'를 확인할 때까지 이 화면을 떠나지 않는다.
+            # (주소만 보지 않고 폼 잔류까지 본다 + 매 라운드 알림창/팝업을 치운다)
+            if self._login_confirmed(driver, self.LOGIN_WAIT_SEC):
                 # 통과했으면 도중에 기록해둔 알림(만료 안내 등)은 실패 사유가 아니다
                 self.login_error = ""
-                print(f"[{self.name}] 자동 로그인 성공")
+                print(f"[{self.name}] 자동 로그인 성공(로그인 상태 확인됨)")
                 return True
+            if self._login_rejected:        # 확인 중 거부 alert → 재클릭 금지
+                return False
             err = self._login_error_text(driver)
             if err:                         # 비번 오류 등 — 더 눌러도 잠기기만 한다
                 self.login_error = err
@@ -1476,12 +1586,32 @@ class BabitalkChannel(BaseChannel):
     # 악순환에 빠졌다(비밀번호는 멀쩡한데도). 사람이 손으로 할 땐 한 번 누르고
     # 안 되면 몇 분 뒤 다시 누르므로 걸리지 않는다 → 그 방식을 그대로 따른다.
     LOGIN_SUBMIT_RETRY = 1       # 연타 금지: 한 사이클에 클릭 1회만
+    LOGIN_TRY_PER_CYCLE = 1      # Hub 도 한 사이클에 login() 을 한 번만 부른다
+                                 # (공통값 2 로 두면 '클릭 1회' 원칙이 Hub 에서 깨진다)
     POST_SUBMIT_ALERT_SEC = 3.0  # 클릭 직후 결과 alert 을 먼저 읽는다
+    # 클릭 뒤 '정말 로그인됐나' 를 지켜보는 시간. 로그인 직후 공지 팝업이 뜨고
+    # SPA 가 화면을 새로 그리느라 전환이 늦다 → 넉넉히 본다(그동안 팝업은 계속 치움).
+    LOGIN_WAIT_SEC = 25
     LOGIN_BACKOFF_SEC = 5.5 * 60  # 실패 시 5분 30초 쉬었다 재시도(차단 5분 + 여유)
+
+    def _logged_in_now(self, driver) -> bool:
+        """대기 없는 즉답 판정 — is_logged_in() 과 같은 기준(주소 + 로그인 폼 잔류).
+
+        폴링에 is_logged_in() 을 쓰면 그 안의 WebDriverWait(12초)가 매 라운드
+        통째로 걸려 확인 시간을 다 잡아먹는다 → 여기선 기다리지 않고 즉답한다."""
+        from selenium.webdriver.common.by import By
+        try:
+            if "/login" in (driver.current_url or ""):
+                return False
+            return not (driver.find_elements(By.CSS_SELECTOR, "input[placeholder='ID']")
+                        or driver.find_elements(By.CSS_SELECTOR, "input[type='password']"))
+        except Exception:
+            return False        # alert 에 막힌 것 — 다음 라운드에서 치우고 다시 본다
 
     def login(self, driver) -> bool:
         """저장된 계정으로 자동 로그인(세션 만료 시 Hub 가 호출).
-        채우고 → 한 번 누르고 → alert 으로 결과 확인. 거부면 그대로 멈추고,
+        채우고 → 한 번 누르고 → alert 으로 결과 확인 → '로그인됐다'가 확인될
+        때까지 이 탭에서 지켜본다. 거부면 그대로 멈추고,
         Hub 가 LOGIN_BACKOFF_SEC(5분 30초) 뒤에 다시 부른다."""
         return self._do_login_flow(driver)
 
