@@ -1752,11 +1752,34 @@ class GangnamUnniChannel(BaseChannel):
     QNA_CLEAR = "M3:Q1000"
     QNA_HEADER_CELL = "M2"
     QNA_HEADERS = ["작성일", "이벤트id", "이벤트명", "내용", "답변상태"]
-    SHEET_CLEAR_EXTRA = (QNA_CLEAR,)
     # 내용 칸에 같이 들어오는 버튼 라벨(질문 본문이 아님)
     QNA_NOISE = {"답변달기", "답변하기", "답변수정", "답변 달기"}
     # 대시보드 '내용' 앞에 붙는 표식. Index.html 이 이걸로 Q&A 행을 구분한다.
     QNA_MARK = "[Q&A] "
+
+    # ── 채팅상담 ──────────────────────────────────────────────
+    # 사이드바 메뉴 '채팅상담' 뒤 숫자(= 응대 필요 건수)가 1 이상일 때만 채팅 페이지까지
+    # 본다. 숫자가 없으면(0) 기존처럼 상담목록 + Q&A 두 가지만 수집한다.
+    # → 대부분의 사이클에서 페이지 이동 1번을 통째로 아낀다(속도·차단 위험).
+    CHAT_URL = "https://partner.gangnamunni.com/chats-new"
+    CHAT_MENU = "채팅상담"
+    # '답변안한 메시지' 체크박스. 띄어쓰기 변동에 대비해 공백을 지우고 앞부분만 본다.
+    CHAT_FILTER = "답변안한"
+    # 대시보드 '내용' 앞에 붙는 표식(Q&A 와 같은 방식) — Index.html 이 이걸로 구분한다.
+    CHAT_MARK = "[채팅] "
+    # 카드 안에 같이 잡히는 상태 꼬리표(이름·본문이 아님)
+    CHAT_TAGS = {"대기", "진행", "완료", "예약완료", "예약 완료", "상담완료", "상담 완료"}
+    # 시트 블록: 같은 '강남언니' 탭의 S열 이후. 상담(B3:K1000)·Q&A(M3:Q1000) 와 안 겹친다.
+    CHAT_START = "S3"
+    CHAT_CLEAR = "S3:W1000"
+    CHAT_HEADER_CELL = "S2"
+    CHAT_HEADERS = ["시각", "이름", "연락처", "내용", "상태"]
+    # 부가 블록은 매 사이클 통째로 비우고 다시 쓴다(지난 사이클 잔재 방지)
+    SHEET_CLEAR_EXTRA = (QNA_CLEAR, CHAT_CLEAR)
+    _RE_CHAT_PHONE = re.compile(r"01[016-9][-\s]?\d{3,4}[-\s]?\d{4}")
+    _RE_CHAT_WHEN = re.compile(
+        r"(오늘|어제|그제|그저께|오전|오후)|\d{1,2}:\d{2}"
+        r"|\d{2,4}[.\-/]\s?\d{1,2}[.\-/]\s?\d{1,2}")
 
     def is_logged_in(self, driver) -> bool:
         """현재 탭 기준 판별(네비게이션은 Hub가 이미 함). SPA 정착까지 대기."""
@@ -1884,6 +1907,10 @@ class GangnamUnniChannel(BaseChannel):
         except Exception:
             pass
 
+        # 사이드바 '채팅상담' 뱃지 숫자는 '이 페이지에 있을 때' 읽어둔다.
+        # (아래에서 Q&A 페이지로 이동하므로 순서를 바꾸면 안 된다)
+        chat_n = self.chat_badge_count(driver)
+
         # ── Q&A(미답변)도 같은 탭에서 이어서 수집 ────────────────
         # 잔액(E1/F1)은 위에서 이미 읽었으므로 이제 페이지를 옮겨도 안전하다.
         # Q&A 쪽이 깨져도 상담목록 결과는 살린다(전체를 실패로 만들지 않음).
@@ -1892,7 +1919,245 @@ class GangnamUnniChannel(BaseChannel):
             out.extend(self.scrape_qna(driver))
         except Exception as e:
             print(f"[{self.name}] Q&A 수집 건너뜀: {classify_error(e).detail}")
+
+        # ── 채팅상담: 뱃지에 숫자가 있을 때만 ─────────────────────
+        if chat_n:
+            print(f"[{self.name}] 채팅상담 {chat_n}건 표시 → /chats-new 확인")
+            try:
+                out.extend(self.scrape_chats(driver))
+            except Exception as e:
+                print(f"[{self.name}] 채팅상담 수집 건너뜀: {classify_error(e).detail}")
         return out
+
+    # ── 채팅상담 페이지 ────────────────────────────────────────
+    def chat_badge_count(self, driver) -> int:
+        """사이드바 '채팅상담' 뒤에 붙은 숫자. 없으면 0.
+
+        숫자는 메뉴 글자와 다른 요소(antd 뱃지)라 텍스트만으로는 안 잡힌다.
+          1순위: '채팅상담' 을 품은 요소 안의 .ant-badge-count[title] → title 값
+          2순위: 메뉴 글자 요소에서 위로 3단계까지 '채팅상담 뒤의 숫자'
+        ※ 상담목록 표의 상담경로 칸에도 '채팅상담' 꼬리표가 있으므로,
+          숫자가 바로 뒤에 붙은 것만 뱃지로 인정한다.
+        ※ 숨은 요소는 innerText 가 '' 라 자연히 걸러진다."""
+        try:
+            n = driver.execute_script("""
+              const label = arguments[0];
+              const has = e => (e.innerText || '').includes(label);
+              for (const b of document.querySelectorAll('.ant-badge-count[title]')) {
+                let node = b;
+                for (let i = 0; i < 4 && node; i++, node = node.parentElement) {
+                  if (has(node)) {
+                    const v = parseInt(b.getAttribute('title'), 10);
+                    if (!isNaN(v)) return v;
+                    break;
+                  }
+                }
+              }
+              const re = new RegExp(label + '[^0-9]{0,3}([0-9]+)');
+              for (const e of document.querySelectorAll('a,li,button,div,span')) {
+                if (!has(e) || [...e.children].some(has)) continue;
+                let node = e;
+                for (let i = 0; i < 3 && node; i++, node = node.parentElement) {
+                  const m = (node.innerText || '').replace(/\\s+/g, ' ').match(re);
+                  if (m) return parseInt(m[1], 10);
+                }
+              }
+              return 0;
+            """, self.CHAT_MENU)
+            return int(n or 0)
+        except Exception as e:
+            print(f"[{self.name}] 채팅상담 뱃지 확인 실패(건너뜀): "
+                  f"{classify_error(e).detail}")
+            return 0
+
+    def _check_unanswered(self, driver) -> bool:
+        """'답변안한 메시지' 체크박스를 TRUE 로 만든다(이미 켜져 있으면 그대로).
+
+        이 필터가 안 걸리면 전체 대화(수백 건)가 딸려오므로, 실패하면 False 를
+        돌려 호출부가 채팅 수집 자체를 포기하게 한다."""
+        from selenium.webdriver.common.by import By
+
+        def labeled(el):
+            """el 위쪽 4단계 안에 '답변안한' 글자가 있는 조상을 반환."""
+            node = el
+            for _ in range(4):
+                try:
+                    node = node.find_element(By.XPATH, "..")
+                except Exception:
+                    return None
+                if self.CHAT_FILTER in (node.text or "").replace(" ", ""):
+                    return node
+            return None
+
+        box = wrap = None
+        for b in driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']"):
+            w = labeled(b)
+            if w is not None:
+                box, wrap = b, w
+                break
+
+        if box is not None and box.is_selected():
+            return True
+
+        # 누를 대상: 라벨(있으면) → 감싼 요소 → 체크박스 자체(JS)
+        targets = []
+        if wrap is not None:
+            try:
+                targets.append(box.find_element(By.XPATH, "ancestor::label[1]"))
+            except Exception:
+                pass
+            targets.append(wrap)
+        else:
+            # input 이 없는 커스텀 UI → 글자 요소를 직접 누른다
+            targets += [e for e in driver.find_elements(
+                By.XPATH, f"//*[contains(text(),'{self.CHAT_FILTER}')]")
+                if e.is_displayed()][:1]
+
+        for t in targets:
+            for click in (lambda: t.click(),
+                          lambda: driver.execute_script("arguments[0].click();", t)):
+                try:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'})", t)
+                    click()
+                except Exception:
+                    continue
+                time.sleep(1.0)
+                if box is None or box.is_selected():
+                    return True
+        return False
+
+    def scrape_chats(self, driver) -> List[dict]:
+        """/chats-new 에서 '답변안한 메시지'만 남기고 남은 대화 카드를 읽는다."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        driver.get(self.CHAT_URL)
+        self.dismiss_popups(driver)
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located(
+            (By.XPATH, f"//*[contains(text(),'{self.CHAT_FILTER}')]")))
+        time.sleep(1.2)
+
+        if not self._check_unanswered(driver):
+            # 필터 없이 읽으면 전체 대화가 미확인으로 쏟아진다 → 이번 사이클은 포기
+            raise RuntimeError("'답변안한 메시지' 체크박스를 켜지 못했습니다")
+        time.sleep(1.5)                     # 목록 재조회 대기
+
+        # 카드 DOM(클래스 해시)이 자주 바뀌므로 '전화번호 + 시각을 함께 가진
+        # 가장 작은 요소' 를 카드로 본다. 숨은 요소는 innerText 가 '' 라 빠진다.
+        cards = driver.execute_script("""
+          const PHONE = /01[016-9][-\\s]?\\d{3,4}[-\\s]?\\d{4}/;
+          const WHEN  = /(오늘|어제|그제|그저께|오전|오후)|\\d{1,2}:\\d{2}/;
+          const hit = e => {
+            const t = e.innerText || "";
+            return t.length < 400 && PHONE.test(t) && WHEN.test(t);
+          };
+          const out = [];
+          for (const e of document.querySelectorAll('li,a,div')) {
+            if (!hit(e) || [...e.children].some(hit)) continue;
+            const t = e.innerText.trim();
+            if (!out.includes(t)) out.push(t);
+          }
+          return out;
+        """) or []
+
+        out = []
+        for text in cards:
+            it = self._parse_chat_card(text)
+            if it:
+                out.append(it)
+        print(f"[{self.name}] 채팅상담 미응대 {len(out)}건")
+        return out
+
+    def _parse_chat_card(self, text: str) -> Optional[dict]:
+        """카드 텍스트 → {이름, 연락처, 내용, 시각}. 전화번호가 없으면 카드가 아님.
+
+        카드 예)  유성근 / 오늘 오후 4:28 / 01077551716 / 고객 : 안녕하세요 / 대기
+        줄 순서가 바뀌어도 되게 '무엇처럼 보이는 줄인지'로 나눈다."""
+        lines = [l.strip() for l in (text or "").split("\n") if l.strip()]
+        phone, when, status, rest = "", "", "", []
+        for l in lines:
+            m = self._RE_CHAT_PHONE.search(l)
+            if m and not phone:
+                phone = m.group(0)
+                if not l.replace(m.group(0), "").strip():
+                    continue                    # 전화번호만 있는 줄
+            if l.replace(" ", "") in {t.replace(" ", "") for t in self.CHAT_TAGS}:
+                status = status or l
+                continue
+            if not when and self._RE_CHAT_WHEN.search(l) and len(l) <= 20:
+                when = l
+                continue
+            rest.append(l)
+        if not phone:
+            return None
+        name = rest[0] if rest else ""
+        msg = " ".join(rest[1:]).strip()
+        return {"kind": "chat", "name": name, "contact": self._fmt_phone(phone),
+                "message": msg, "status": status,
+                "when": self._chat_datetime(when)}
+
+    @staticmethod
+    def _fmt_phone(s: str) -> str:
+        """'01077551716' → '010-7755-1716'.
+        하이픈이 없으면 시트가 숫자로 읽어 앞의 0을 지운다(→ 1077551716).
+        상담목록 연락처 표기와도 같은 모양이 된다."""
+        d = re.sub(r"\D", "", s or "")
+        if len(d) == 11:
+            return f"{d[:3]}-{d[3:7]}-{d[7:]}"
+        if len(d) == 10:
+            return f"{d[:3]}-{d[3:6]}-{d[6:]}"
+        return (s or "").strip()
+
+    @staticmethod
+    def _chat_datetime(s: str) -> str:
+        """채팅 목록의 시각 표기 → 시트 날짜 문자열.
+            '오늘 오후 4:28'  → '2026-08-13 16:28'
+            '어제 오전 9:05'  → '2026-08-12 09:05'
+            '08-05 오전 9:34' → '2026-08-05 09:34'   (연도 없음 = 올해, 미래면 작년)
+        ※ 날짜(월-일)와 오전/오후가 함께 오므로 '오전/오후가 있으면 오늘' 로 보면
+          지난 대화가 전부 오늘 날짜로 찍힌다 → 날짜부터 먼저 읽는다."""
+        s = re.sub(r"\s+", " ", (s or "").strip())
+        now = datetime.now()
+
+        h = mi = None                                   # 시:분(오전/오후 반영)
+        m = re.search(r"(오전|오후)?\s*(\d{1,2}):(\d{2})", s)
+        if m:
+            h, mi = int(m.group(2)), int(m.group(3))
+            if m.group(1) == "오후" and h != 12:
+                h += 12
+            elif m.group(1) == "오전" and h == 12:
+                h = 0
+
+        day = None
+        m = re.search(r"(\d{4})[.\-/]\s?(\d{1,2})[.\-/]\s?(\d{1,2})", s)     # 2026.08.11
+        if m:
+            day = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        elif re.search(r"(\d{2})\.\s?(\d{1,2})\.\s?(\d{1,2})", s):           # 26.08.11
+            m = re.search(r"(\d{2})\.\s?(\d{1,2})\.\s?(\d{1,2})", s)
+            day = date(2000 + int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        else:
+            m = re.search(r"(?<!\d)(\d{1,2})[-./](\d{1,2})(?!\d)", s)        # 08-05
+            if m:
+                try:
+                    day = date(now.year, int(m.group(1)), int(m.group(2)))
+                    if day > now.date():          # 아직 안 온 날짜 = 작년 대화
+                        day = date(now.year - 1, day.month, day.day)
+                except ValueError:
+                    day = None
+            else:
+                for k, v in (("오늘", 0), ("어제", 1), ("그제", 2), ("그저께", 2)):
+                    if k in s:
+                        day = (now - timedelta(days=v)).date()
+                        break
+                if day is None and h is not None:
+                    day = now.date()              # 시각만 있으면 오늘로 본다
+        if day is None:
+            return _to_sheet_date(s)
+        if h is None:
+            return day.strftime("%Y-%m-%d")
+        return datetime(day.year, day.month, day.day, h, mi).strftime("%Y-%m-%d %H:%M")
 
     # ── Q&A 페이지 ────────────────────────────────────────────
     @staticmethod
@@ -2001,22 +2266,32 @@ class GangnamUnniChannel(BaseChannel):
 
     def to_sheet_rows(self, items: list) -> list:
         # 상담 건만 B3:K1000 에. Q&A 는 모양이 달라 extra_sheet_data 로 따로 나간다.
+        # 채팅상담은 시트에 열을 늘리지 않고 대시보드에만 올린다.
         return [[_to_sheet_date(it["applied"]), it["customer"], it["contact"],
                  it["route"], it["status"], it["sisul"], it["doctor"],
                  it["memo"], it["sms"]]
-                for it in items if it.get("kind") != "qna"]
+                for it in items if it.get("kind") not in ("qna", "chat")]
 
     def extra_sheet_data(self, items: list) -> list:
+        # Q&A(M열) · 채팅상담(S열) 을 각각 별도 블록으로. 둘 다 상담 블록과 안 겹친다.
+        out = []
         qs = [it for it in items if it.get("kind") == "qna"]
-        if not qs:
-            return []
-        return [{"range": self.QNA_START,
-                 "values": [[it["date"], it["event_id"], it["event"],
-                             it["question"], self.QNA_UNANSWERED] for it in qs]}]
+        if qs:
+            out.append({"range": self.QNA_START,
+                        "values": [[it["date"], it["event_id"], it["event"],
+                                    it["question"], self.QNA_UNANSWERED]
+                                   for it in qs]})
+        cs = [it for it in items if it.get("kind") == "chat"]
+        if cs:
+            out.append({"range": self.CHAT_START,
+                        "values": [[it["when"], it["name"], it["contact"],
+                                    it["message"], it["status"]] for it in cs]})
+        return out
 
     def dashboard_rows(self, items: list) -> list:
         # 상담: [이름=고객정보, 내용=상담경로, 시각=신청일시, 연락처]
         # Q&A : [이름=이벤트명(줄임), 내용='[Q&A] 질문', 시각=작성일, 연락처=없음]
+        # 채팅: [이름, 내용='[채팅] 마지막 메시지', 시각, 연락처]
         #   → 열 구조(5칸)는 그대로 두고 '내용' 앞의 표식으로만 구분한다.
         #     (시트/Code.gs/GUI 어디도 안 바꿔도 되게)
         rows = []
@@ -2025,6 +2300,12 @@ class GangnamUnniChannel(BaseChannel):
                 ev = it["event"]
                 rows.append([(ev[:18] + "…") if len(ev) > 19 else (ev or "Q&A"),
                              self.QNA_MARK + it["question"], it["date"], ""])
+            elif it.get("kind") == "chat":
+                # 채팅: [이름=상대 이름, 내용='[채팅] 마지막 메시지',
+                #        시각=마지막 메시지 시각, 연락처=전화번호]
+                rows.append([it["name"] or "채팅상담",
+                             self.CHAT_MARK + (it["message"] or "(내용 없음)"),
+                             it["when"], it["contact"]])
             else:
                 rows.append([it["customer"], it["route"],
                              _to_sheet_date(it["applied"]), it["contact"]])
@@ -2037,6 +2318,11 @@ class GangnamUnniChannel(BaseChannel):
                                     "pattern": "yyyy.mm.dd hh:mm"}})
         # Q&A 블록 머리글(M2~) — 상담 블록과 떨어져 있어 기존 열을 안 건드린다
         ws.update(values=[self.QNA_HEADERS], range_name=self.QNA_HEADER_CELL)
+        # 채팅상담 블록 머리글(S2~) + 시각 열 날짜 표시서식
+        ws.update(values=[self.CHAT_HEADERS], range_name=self.CHAT_HEADER_CELL)
+        ws.format(f"{self.CHAT_START}:S1000",
+                  {"numberFormat": {"type": "DATE_TIME",
+                                    "pattern": "yyyy.mm.dd hh:mm"}})
 
     def _scrape(self, driver):
         return []
