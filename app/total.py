@@ -884,6 +884,13 @@ class BaseChannel(ABC):
     # → 몇 번 더 새로고침해도 계정이 잠기지 않는다.
     LOGIN_PAGE_RETRY = 3
     LOGIN_RELOAD_WAIT_SEC = 1.5     # 새로고침 전에 잠깐 쉼(렌더 여유)
+    # 눌렀는데도 로그인 화면이 그대로일 때: '새로고침 → 폼 다시 채우기 → 다시 클릭'
+    # 을 이만큼 더 돈다(0 = 하지 않음, 예전 동작).
+    # 여기까지 오는 실패는 '거부 alert 도 오류 문구도 없는' 경우뿐이다
+    # (거부는 그 전에 이미 중단된다) → 사이트가 아이디/비번을 거절한 게 아니라
+    # 클릭이 팝업에 먹혔거나 버튼이 끝내 활성화되지 않은 것 = 제출이 서버까지
+    # 가지도 않았을 가능성이 크다. 그래서 재시도해도 '연속 실패 카운터'와 무관하다.
+    LOGIN_RESET_RETRY = 0
     # 제출을 '한 번도 못 해본' 실패(폼/버튼 못 찾음 등)는 사이트에 아무 흔적이 없다
     # → 길게 쉴 이유가 없다. 이만큼만 쉬고 바로 다시 시도한다.
     LOGIN_BACKOFF_SHORT_SEC = 30
@@ -1383,61 +1390,94 @@ class BaseChannel(ABC):
                 self.login_error = f"로그인 화면 새로고침 실패({type(e).__name__})"
         return "fail"
 
+    def _submit_once(self, driver, i: int = 1):
+        """폼을 채우고 '로그인'을 한 번 눌러 결과까지 지켜본다.
+
+        반환 True  = 로그인됨(확인 완료)
+             False = '다시 눌러선 안 되는' 실패 — 거부 alert·폼 오류문구·입력 불가
+             None  = 판단 불가 — 눌렀는데 화면이 그대로다(거부 근거는 하나도 없음).
+                     다시 누를지, 새로고침하고 처음부터 할지는 부르는 쪽이 정한다."""
+        filled = self._fill_or_reload(driver)
+        if filled == "already":
+            print(f"[{self.name}] 새로고침해 보니 이미 로그인 상태 — 그대로 진행")
+            self.login_error = ""
+            return True
+        if filled != "ok":
+            print(f"[{self.name}] 로그인 입력 실패 — {self.login_error}")
+            return False
+        # 누르기 직전에 오버레이를 한 번 걷어낸다 — 공지 팝업이 '로그인' 버튼을
+        # 덮고 있으면 클릭이 팝업에 먹혀 폼만 남고(=클릭이 씹힌 것처럼 보임)
+        # 그대로 '넘어가지 못했습니다'로 끝난다.
+        try:
+            self.dismiss_popups(driver)
+        except Exception:
+            pass
+        self._prepare_submit(driver)
+        if not self._submit_login(driver):
+            print(f"[{self.name}] 로그인 클릭 실패 — {self.login_error}")
+            return False
+        self.login_attempted = True         # 여기서부터는 사이트에 흔적이 남는다
+        print(f"[{self.name}] '로그인' 클릭 {i}/{self.LOGIN_SUBMIT_RETRY} — 결과 대기")
+        # ⚠️ 순서 주의 — 결과 alert 을 '기다리기보다 먼저' 읽는다.
+        #    chromedriver 기본값(dismiss and notify)은 alert 이 떠 있는 동안
+        #    들어온 첫 명령으로 그 alert 을 '닫아버리고' 예외를 낸다.
+        #    예전엔 아래 WebDriverWait 안의 _at_login_page() 가 그 첫 명령이었고,
+        #    거기서 예외를 삼켜(True 반환) 버려서 — 바비톡처럼 로그인 결과를
+        #    alert 으로만 알려주는 사이트는 실패 사유가 통째로 사라졌다.
+        #    그 결과 '클릭이 씹혔나 보다'로 오판해 재클릭 → 사이트의 연속 실패
+        #    카운터를 우리 손으로 채워 계정이 잠기는 악순환이 돌았다.
+        if self._note_alert(self._pop_alert(driver, self.POST_SUBMIT_ALERT_SEC)):
+            return False                    # 거부 alert → 재클릭 금지
+        # 로그인 '완료'를 확인할 때까지 이 화면을 떠나지 않는다.
+        # (주소만 보지 않고 폼 잔류까지 본다 + 매 라운드 알림창/팝업을 치운다)
+        if self._login_confirmed(driver, self.LOGIN_WAIT_SEC):
+            # 통과했으면 도중에 기록해둔 알림(만료 안내 등)은 실패 사유가 아니다
+            self.login_error = ""
+            print(f"[{self.name}] 자동 로그인 성공(로그인 상태 확인됨)")
+            return True
+        if self._login_rejected:            # 확인 중 거부 alert → 재클릭 금지
+            return False
+        err = self._login_error_text(driver)
+        if err:                             # 비번 오류 등 — 더 눌러도 잠기기만 한다
+            self.login_error = err
+            print(f"[{self.name}] 로그인 거부: {err}")
+            return False
+        return None                         # 거부 근거 없음 · 화면만 그대로
+
     def _do_login_flow(self, driver) -> bool:
         """공통 자동 로그인: 이동 → 입력(안 되면 새로고침 재시도) → 클릭(폴백)
-        → 결과 확인 → 재클릭."""
+        → 결과 확인 → 재클릭 → 그래도 화면이 그대로면 새로고침하고 처음부터."""
         self.login_error = ""
         self.login_attempted = False        # 아직 '제출'은 안 했다(짧은 백오프 판단용)
         if self._open_login_page(driver):
             return True                     # 이미 로그인됨(로그인 페이지가 튕겨냄)
 
-        for i in range(1, self.LOGIN_SUBMIT_RETRY + 1):
-            filled = self._fill_or_reload(driver)
-            if filled == "already":
-                print(f"[{self.name}] 새로고침해 보니 이미 로그인 상태 — 그대로 진행")
-                self.login_error = ""
-                return True
-            if filled != "ok":
-                print(f"[{self.name}] 로그인 입력 실패 — {self.login_error}")
-                return False
-            # 누르기 직전에 오버레이를 한 번 걷어낸다 — 공지 팝업이 '로그인' 버튼을
-            # 덮고 있으면 클릭이 팝업에 먹혀 폼만 남고(=클릭이 씹힌 것처럼 보임)
-            # 그대로 '넘어가지 못했습니다'로 끝난다.
-            try:
-                self.dismiss_popups(driver)
-            except Exception:
-                pass
-            self._prepare_submit(driver)
-            if not self._submit_login(driver):
-                print(f"[{self.name}] 로그인 클릭 실패 — {self.login_error}")
-                return False
-            self.login_attempted = True     # 여기서부터는 사이트에 흔적이 남는다
-            print(f"[{self.name}] '로그인' 클릭 {i}/{self.LOGIN_SUBMIT_RETRY} — 결과 대기")
-            # ⚠️ 순서 주의 — 결과 alert 을 '기다리기보다 먼저' 읽는다.
-            #    chromedriver 기본값(dismiss and notify)은 alert 이 떠 있는 동안
-            #    들어온 첫 명령으로 그 alert 을 '닫아버리고' 예외를 낸다.
-            #    예전엔 아래 WebDriverWait 안의 _at_login_page() 가 그 첫 명령이었고,
-            #    거기서 예외를 삼켜(True 반환) 버려서 — 바비톡처럼 로그인 결과를
-            #    alert 으로만 알려주는 사이트는 실패 사유가 통째로 사라졌다.
-            #    그 결과 '클릭이 씹혔나 보다'로 오판해 재클릭 → 사이트의 연속 실패
-            #    카운터를 우리 손으로 채워 계정이 잠기는 악순환이 돌았다.
-            if self._note_alert(self._pop_alert(driver, self.POST_SUBMIT_ALERT_SEC)):
-                return False                # 거부 alert → 재클릭 금지
-            # 로그인 '완료'를 확인할 때까지 이 화면을 떠나지 않는다.
-            # (주소만 보지 않고 폼 잔류까지 본다 + 매 라운드 알림창/팝업을 치운다)
-            if self._login_confirmed(driver, self.LOGIN_WAIT_SEC):
-                # 통과했으면 도중에 기록해둔 알림(만료 안내 등)은 실패 사유가 아니다
-                self.login_error = ""
-                print(f"[{self.name}] 자동 로그인 성공(로그인 상태 확인됨)")
-                return True
-            if self._login_rejected:        # 확인 중 거부 alert → 재클릭 금지
-                return False
-            err = self._login_error_text(driver)
-            if err:                         # 비번 오류 등 — 더 눌러도 잠기기만 한다
-                self.login_error = err
-                print(f"[{self.name}] 로그인 거부: {err}")
-                return False
-            time.sleep(2)                   # 클릭이 씹힌 경우 → 재클릭
+        for r in range(self.LOGIN_RESET_RETRY + 1):
+            if r:
+                # 여기 오는 건 '거부당한 근거가 하나도 없는데 화면만 그대로'일 때뿐이다
+                # (거부 alert·폼 오류문구는 _submit_once 가 이미 False 로 끊는다).
+                # 곧 아이디/비번을 거절당한 게 아니라 클릭이 팝업에 먹혔거나 SPA 가
+                # 반쯤 죽은 것 → 사람이 하듯 새로고침해 폼을 새로 그리고 다시 친다.
+                # (예전엔 여기서 그냥 포기해 5분 30초를 통째로 쉬었다)
+                print(f"[{self.name}] 로그인 화면 잔류 — 새로고침 후 처음부터 다시 "
+                      f"({r}/{self.LOGIN_RESET_RETRY})")
+                time.sleep(self.LOGIN_RELOAD_WAIT_SEC)
+                try:
+                    if self._open_login_page(driver):
+                        print(f"[{self.name}] 새로고침해 보니 이미 로그인 상태 — 그대로 진행")
+                        self.login_error = ""
+                        return True
+                except Exception as e:
+                    self.login_error = f"로그인 화면 새로고침 실패({type(e).__name__})"
+                    return False
+                self.login_error = ""       # 앞 라운드 사유는 지운다(새로 판단한다)
+
+            for i in range(1, self.LOGIN_SUBMIT_RETRY + 1):
+                res = self._submit_once(driver, i)
+                if res is not None:
+                    return res
+                if i < self.LOGIN_SUBMIT_RETRY:
+                    time.sleep(2)           # 클릭이 씹힌 경우 → 재클릭
 
         self.login_error = (self.login_error
                             or "로그인 화면을 넘어가지 못했습니다(클릭 후에도 잔류)")
@@ -1588,6 +1628,13 @@ class BabitalkChannel(BaseChannel):
     LOGIN_SUBMIT_RETRY = 1       # 연타 금지: 한 사이클에 클릭 1회만
     LOGIN_TRY_PER_CYCLE = 1      # Hub 도 한 사이클에 login() 을 한 번만 부른다
                                  # (공통값 2 로 두면 '클릭 1회' 원칙이 Hub 에서 깨진다)
+    # 눌렀는데 거부 alert 도 오류 문구도 없이 로그인 화면만 그대로일 때
+    # (= 공지 팝업에 클릭이 먹혔거나 버튼이 끝내 활성화되지 않은 것) 새로고침하고
+    # 처음부터 한 번 더. 예전엔 이 상황에서 곧장 5분 30초를 쉬어, 로그아웃되면
+    # 사람이 손으로 로그인해 줄 때까지 수집이 계속 밀렸다.
+    # 이걸 켜도 한 사이클 최대 제출은 2회 → 사이트의 '5회 연속 실패' 선 아래다.
+    # (아이디/비번이 실제로 틀리면 첫 alert 에서 바로 멈추므로 2회까지 가지 않는다)
+    LOGIN_RESET_RETRY = 1
     POST_SUBMIT_ALERT_SEC = 3.0  # 클릭 직후 결과 alert 을 먼저 읽는다
     # 클릭 뒤 '정말 로그인됐나' 를 지켜보는 시간. 로그인 직후 공지 팝업이 뜨고
     # SPA 가 화면을 새로 그리느라 전환이 늦다 → 넉넉히 본다(그동안 팝업은 계속 치움).
