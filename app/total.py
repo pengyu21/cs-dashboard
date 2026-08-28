@@ -405,6 +405,35 @@ def _cell_lines(el) -> List[str]:
     return [ln.strip() for ln in el.text.split("\n") if ln.strip()]
 
 
+def _cell_lines_dom(driver, el) -> List[str]:
+    """_cell_lines 의 '레이아웃 없이도 되는' 버전 — 줄 나눔을 지켜서 읽는다.
+
+    왜 필요한가(실측): 셀레니움 .text 는 렌더링 결과(innerText)라, 탭이 뒤로
+    가 있거나 레이아웃이 아직 안 잡히면 빈 문자열이 된다. 예전 코드는 그때
+    textContent 로 폴백했는데 textContent 에는 줄 구분이 없어
+    '대한민국' + '전미연' 이 '대한민국전미연' 으로 붙어버렸다
+    (바비톡 고객정보 칸은 [국적, 이름] 두 줄을 전제로 첫 줄을 떼어낸다).
+    → innerText 가 비면 텍스트 노드를 직접 훑어 '노드 하나 = 한 줄' 로 만든다."""
+    try:
+        txt = driver.execute_script("""
+          var e = arguments[0], t = e.innerText;
+          if (t && t.trim()) return t;
+          var parts = [];
+          (function walk(n) {
+            for (var i = 0; i < n.childNodes.length; i++) {
+              var c = n.childNodes[i];
+              if (c.nodeType === 3) { var s = (c.textContent || '').trim();
+                                      if (s) parts.push(s); }
+              else if (c.nodeType === 1) walk(c);
+            }
+          })(e);
+          return parts.join(String.fromCharCode(10));
+        """, el)
+    except Exception:
+        txt = el.get_attribute("textContent") or ""
+    return [ln.strip() for ln in (txt or "").split(chr(10)) if ln.strip()]
+
+
 def _to_sheet_date(s: str):
     """다양한 날짜 포맷 → 시트가 날짜값으로 인식할 문자열.
     - 날짜+시각: 'YYYY-MM-DD HH:MM' 로 통일
@@ -1575,19 +1604,44 @@ class BabitalkChannel(BaseChannel):
     LIST_URL = "https://client.babitalk.com/ask"
     USER_ID, USER_PW = account("babitalk")
 
-    # 시트 매핑: /ask 테이블 td#0~#15 → '바비톡' 탭 B~Q (헤더 순서 동일)
+    # 시트 매핑: /ask 테이블 → '바비톡' 탭 B~Q (16칸, 순서 동일)
     #   B CS현황 C 고객정보 D 연락처 E 이벤트명/의사명 F 유입경로 G 플랫폼종류
     #   H EID I 상담요청시각 J 부위/시술 K 고객코멘트 L 문자발송 M 상담신청단가
     #   N 소진 O CS메모 P 신청일시(날짜서식) Q 비고
+    #
+    # ⚠️ 표의 열 번호를 고정으로 쓰지 않는다 — 머리글 이름으로 찾는다.
+    #    (2026-08 실측) 사이트가 '예약 관리' 열을 th8 자리에 새로 끼워 넣어 표가
+    #    16칸 → 17칸이 되면서 그 뒤 열이 전부 한 칸씩 밀렸다. 고정 번호를 쓰던
+    #    예전 코드는 CS메모(실제 td14) 대신 '소진'(td13, 금액)을 읽었고 —
+    #    금액은 늘 값이 있으니 — 모든 행을 '메모 있음'으로 보고 걸러, 메모가
+    #    비어 있는 신규를 한 건도 못 잡았다(수집 0건). 열이 또 늘어나도 버티도록
+    #    매 수집마다 thead 를 읽어 매핑을 만든다.
     SHEET_TAB = "바비톡"
     SHEET_START = "B3"
     SHEET_CLEAR = "B3:Q1000"
-    N_COLS = 16                      # B~Q
+    N_COLS = 16                      # B~Q (시트 칸 수 — 표가 늘어도 이건 그대로)
     MIN_COLS = 14                    # 이보다 적으면 데이터행 아님(그룹행/빈행) → 스킵
     NAME_COL = 1                     # cols 내 '고객정보' 인덱스. 셀 첫 줄=국적(국기 라벨)
     DATE_COL = 14                    # cols 내 '신청일시' 인덱스(→ 시트 P열)
     CSMEMO_COL = 13                  # cols 내 'CS메모' 인덱스(→ 시트 O열)
-    NOISE = {"arrow_right"}          # material-symbols 아이콘 글자 제거
+    # material-symbols 아이콘의 리거처 글자(아이콘인데 텍스트로 읽힌다) 제거.
+    # CS현황 칸이 대표적: 실제 값 '확인'·'미내원' 사이에 화살표 아이콘 이름이 섞여
+    # 시트 B열에 '확인 arrow_drop_down ... 미내원' 처럼 찍혔다.
+    NOISE = {"arrow_right", "arrow_drop_down", "arrow_drop_up",
+             "keyboard_arrow_right", "keyboard_arrow_left",
+             "keyboard_arrow_down", "keyboard_arrow_up",
+             "expand_more", "expand_less", "more_vert", "help"}
+    _last_tdx: tuple = ()            # 직전 열 매핑(바뀔 때만 로그)
+
+    # 시트 칸(B~Q) 순서대로의 머리글 이름. 공백을 지운 뒤 '앞부분 일치'로 찾는다
+    # ('고객 코멘트 (클릭 시 전체보기)', 'EID help' 처럼 꼬리가 붙어 있어서).
+    # 여기 없는 열(예: 새로 생긴 '예약 관리')은 시트에 넣지 않는다 → 기존 시트
+    # 서식·수식·웹앱이 그대로 동작한다.
+    SHEET_COLS = ("CS현황", "고객 정보", "연락처", "이벤트명/의사명", "유입경로",
+                  "플랫폼 종류", "EID", "상담요청시각", "부위/시술", "고객 코멘트",
+                  "문자발송", "상담 신청 단가", "소진", "CS메모", "신청일시", "비고")
+    # 머리글을 못 읽었을 때 쓸 표 열 번호(2026-08 실측 화면 기준, '예약 관리'=8 제외)
+    FALLBACK_TD = (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16)
 
     def is_logged_in(self, driver) -> bool:
         """현재 탭 기준 판별(네비게이션은 Hub가 수행). SPA 정착까지 대기."""
@@ -1686,6 +1740,36 @@ class BabitalkChannel(BaseChannel):
         return " ".join(t for t in (txt or "").split()
                         if t not in ("add", "+", "arrow_right", "note_add", "edit"))
 
+    @staticmethod
+    def _norm_head(s: str) -> str:
+        """머리글 비교용 정규화 — 공백 제거 + 꼬리 아이콘 글자('help') 제거."""
+        return re.sub(r"help$", "", re.sub(r"\s+", "", s or ""))
+
+    def _td_index(self, driver) -> List[int]:
+        """시트 칸(B~Q) 순서 → 실제 표의 td 번호. 머리글을 못 읽으면 FALLBACK_TD.
+
+        사이트가 열을 끼워 넣어도(2026-08 '예약 관리') 이름으로 찾으므로 밀리지
+        않는다. 이름을 못 찾은 칸은 -1(=시트에 빈칸)로 둔다."""
+        from selenium.webdriver.common.by import By
+        try:
+            heads = [self._norm_head(t.text or t.get_attribute("textContent"))
+                     for t in driver.find_elements(By.CSS_SELECTOR, "thead th")]
+        except Exception:
+            heads = []
+        idx = []
+        for want in self.SHEET_COLS:
+            w = self._norm_head(want)
+            idx.append(next((i for i, h in enumerate(heads) if h.startswith(w)), -1))
+        # 판정·식별에 꼭 필요한 세 칸을 못 찾았으면 머리글 해석 실패로 보고 폴백.
+        # (여기서 CS메모를 엉뚱한 칸으로 잡으면 신규를 통째로 놓친다 — 실제 사고)
+        if any(idx[k] < 0 for k in (self.NAME_COL, self.CSMEMO_COL, self.DATE_COL)):
+            print(f"[{self.name}] 표 머리글을 못 읽음 → 기본 열 번호로 진행")
+            return list(self.FALLBACK_TD)
+        if tuple(idx) != self._last_tdx:
+            self._last_tdx = tuple(idx)
+            print(f"[{self.name}] 표 열 매핑: {idx}")
+        return idx
+
     def scrape(self, driver) -> List[dict]:
         """/ask 테이블에서 CS메모(O열) 비어있는 신규(=CS 미확인)만 B~Q로 추출. 실패 시 예외."""
         from selenium.webdriver.common.by import By
@@ -1696,6 +1780,7 @@ class BabitalkChannel(BaseChannel):
             (By.CSS_SELECTOR, "tbody.MuiTableBody-root tr")))
         time.sleep(1.2)
 
+        tdx = self._td_index(driver)            # 시트 칸 → 표 td 번호
         rows = driver.find_elements(By.CSS_SELECTOR, "tbody.MuiTableBody-root tr")
         out = []
         for row in rows:
@@ -1703,17 +1788,15 @@ class BabitalkChannel(BaseChannel):
             if len(tds) < self.MIN_COLS:        # 데이터 행이 아니면(빈행/그룹행) 스킵
                 continue
             cols = []
-            for i in range(self.N_COLS):        # 셀이 모자라도 빈칸으로 안전 처리
-                if i < len(tds):
-                    lines = _cell_lines(tds[i])         # .text(보이는 텍스트)
-                    if not lines:                       # 숨겨져 비면 textContent 폴백
-                        tc = (tds[i].get_attribute("textContent") or "").strip()
-                        if tc:
-                            lines = [tc]
-                    lines = [l for l in lines if l not in self.NOISE]
+            for si, ti in enumerate(tdx):       # 셀이 모자라도 빈칸으로 안전 처리
+                if 0 <= ti < len(tds):
+                    # 줄 나눔을 지켜 읽는다 — 고객정보 칸의 [국적, 이름] 분리가
+                    # 여기에 걸려 있어, 붙어서 읽히면 이름에 국적이 남는다.
+                    lines = [l for l in _cell_lines_dom(driver, tds[ti])
+                             if l not in self.NOISE]
                     # 고객정보 셀은 [국적, 이름] 두 줄(국기 라벨 '대한민국' 등이 첫 줄).
                     # 첫 줄(국적)을 떼고 이름만 남긴다 — 국적이 무엇이든(외국인 포함) 동작.
-                    if i == self.NAME_COL and len(lines) >= 2:
+                    if si == self.NAME_COL and len(lines) >= 2:
                         lines = lines[1:]
                     cols.append(" ".join(lines))
                 else:
@@ -1723,8 +1806,10 @@ class BabitalkChannel(BaseChannel):
                 continue
             # CS메모칸: 미작성(신규)이면 '+' 버튼만 있으므로, 버튼/아이콘을 뺀
             # '실제 메모 텍스트'로 다시 채워 판정·기록한다(시트 O열도 깨끗해짐).
-            if self.CSMEMO_COL < len(tds):
-                cols[self.CSMEMO_COL] = self._memo_text(driver, tds[self.CSMEMO_COL])
+            memo_td = tdx[self.CSMEMO_COL]
+            if not (0 <= memo_td < len(tds)):
+                continue                        # 메모칸이 없으면 신규 여부를 판정할 수 없다
+            cols[self.CSMEMO_COL] = self._memo_text(driver, tds[memo_td])
             # 신규 = CS메모 비어있음(=CS 미확인). 실제 메모 있으면 제외.
             if cols[self.CSMEMO_COL].strip():
                 continue
@@ -1805,11 +1890,10 @@ class GangnamUnniChannel(BaseChannel):
     QNA_MARK = "[Q&A] "
 
     # ── 채팅상담 ──────────────────────────────────────────────
-    # 사이드바 메뉴 '채팅상담' 뒤 숫자(= 응대 필요 건수)가 1 이상일 때만 채팅 페이지까지
-    # 본다. 숫자가 없으면(0) 기존처럼 상담목록 + Q&A 두 가지만 수집한다.
-    # → 대부분의 사이클에서 페이지 이동 1번을 통째로 아낀다(속도·차단 위험).
+    # 매 사이클 상담목록 → Q&A → 채팅 순으로 다 본다.
+    # (예전엔 사이드바 뱃지 숫자로 걸렀는데, 사이트에서 그 뱃지가 없어지면서
+    #  채팅 수집이 조용히 꺼져 있었다 — scrape() 아래쪽 주석 참고)
     CHAT_URL = "https://partner.gangnamunni.com/chats-new"
-    CHAT_MENU = "채팅상담"
     # '답변안한 메시지' 체크박스. 띄어쓰기 변동에 대비해 공백을 지우고 앞부분만 본다.
     CHAT_FILTER = "답변안한"
     # 대시보드 '내용' 앞에 붙는 표식(Q&A 와 같은 방식) — Index.html 이 이걸로 구분한다.
@@ -1954,10 +2038,6 @@ class GangnamUnniChannel(BaseChannel):
         except Exception:
             pass
 
-        # 사이드바 '채팅상담' 뱃지 숫자는 '이 페이지에 있을 때' 읽어둔다.
-        # (아래에서 Q&A 페이지로 이동하므로 순서를 바꾸면 안 된다)
-        chat_n = self.chat_badge_count(driver)
-
         # ── Q&A(미답변)도 같은 탭에서 이어서 수집 ────────────────
         # 잔액(E1/F1)은 위에서 이미 읽었으므로 이제 페이지를 옮겨도 안전하다.
         # Q&A 쪽이 깨져도 상담목록 결과는 살린다(전체를 실패로 만들지 않음).
@@ -1967,56 +2047,22 @@ class GangnamUnniChannel(BaseChannel):
         except Exception as e:
             print(f"[{self.name}] Q&A 수집 건너뜀: {classify_error(e).detail}")
 
-        # ── 채팅상담: 뱃지에 숫자가 있을 때만 ─────────────────────
-        if chat_n:
-            print(f"[{self.name}] 채팅상담 {chat_n}건 표시 → /chats-new 확인")
-            try:
-                out.extend(self.scrape_chats(driver))
-            except Exception as e:
-                print(f"[{self.name}] 채팅상담 수집 건너뜀: {classify_error(e).detail}")
+        # ── 채팅상담: 매 사이클 확인 ──────────────────────────────
+        # 예전엔 사이드바 '채팅상담' 뒤 뱃지 숫자가 1 이상일 때만 /chats-new 를
+        # 열었다(페이지 이동 1번 절약). 그런데 (2026-08 실측) 사이트 개편으로
+        # 채팅상담 메뉴에서 숫자 뱃지가 사라졌다 — 남아 있는 뱃지는 '알림'의
+        # 것(ant-badge-dot, title=미확인 알림 수)이고 채팅과 무관하다.
+        # → 뱃지가 늘 0 으로 읽혀 채팅 수집이 통째로 꺼져 있었다.
+        # 이제 뱃지를 보지 않고 상담목록 · Q&A · 채팅 셋을 매번 다 본다.
+        # (여기가 마지막이라 탭이 /chats-new 에 남지만, 다음 사이클에 Hub 가
+        #  LIST_URL 로 다시 열므로 되돌릴 필요 없다)
+        try:
+            out.extend(self.scrape_chats(driver))
+        except Exception as e:
+            print(f"[{self.name}] 채팅상담 수집 건너뜀: {classify_error(e).detail}")
         return out
 
     # ── 채팅상담 페이지 ────────────────────────────────────────
-    def chat_badge_count(self, driver) -> int:
-        """사이드바 '채팅상담' 뒤에 붙은 숫자. 없으면 0.
-
-        숫자는 메뉴 글자와 다른 요소(antd 뱃지)라 텍스트만으로는 안 잡힌다.
-          1순위: '채팅상담' 을 품은 요소 안의 .ant-badge-count[title] → title 값
-          2순위: 메뉴 글자 요소에서 위로 3단계까지 '채팅상담 뒤의 숫자'
-        ※ 상담목록 표의 상담경로 칸에도 '채팅상담' 꼬리표가 있으므로,
-          숫자가 바로 뒤에 붙은 것만 뱃지로 인정한다.
-        ※ 숨은 요소는 innerText 가 '' 라 자연히 걸러진다."""
-        try:
-            n = driver.execute_script("""
-              const label = arguments[0];
-              const has = e => (e.innerText || '').includes(label);
-              for (const b of document.querySelectorAll('.ant-badge-count[title]')) {
-                let node = b;
-                for (let i = 0; i < 4 && node; i++, node = node.parentElement) {
-                  if (has(node)) {
-                    const v = parseInt(b.getAttribute('title'), 10);
-                    if (!isNaN(v)) return v;
-                    break;
-                  }
-                }
-              }
-              const re = new RegExp(label + '[^0-9]{0,3}([0-9]+)');
-              for (const e of document.querySelectorAll('a,li,button,div,span')) {
-                if (!has(e) || [...e.children].some(has)) continue;
-                let node = e;
-                for (let i = 0; i < 3 && node; i++, node = node.parentElement) {
-                  const m = (node.innerText || '').replace(/\\s+/g, ' ').match(re);
-                  if (m) return parseInt(m[1], 10);
-                }
-              }
-              return 0;
-            """, self.CHAT_MENU)
-            return int(n or 0)
-        except Exception as e:
-            print(f"[{self.name}] 채팅상담 뱃지 확인 실패(건너뜀): "
-                  f"{classify_error(e).detail}")
-            return 0
-
     def _check_unanswered(self, driver) -> bool:
         """'답변안한 메시지' 체크박스를 TRUE 로 만든다(이미 켜져 있으면 그대로).
 

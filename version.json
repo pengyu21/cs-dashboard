@@ -1,10 +1,10 @@
 {
-  "version": "1.0.19",
-  "notes": "바비톡 로그인 잔류 시 새로고침 후 재시도",
+  "version": "1.0.20",
+  "notes": "바비톡 '예약 관리' 열 추가로 밀린 CS메모 판정 수정(신규 0건 문제) · 강남언니 채팅상담을 뱃지 없이 매 사이클 수집",
   "files": [
     {
       "name": "total.py",
-      "sha256": "d166a7e943172418f00dff0b46229dbaeb1f4a792cb07e9c8bc5f9a467a47566"
+      "sha256": "4386621bbd1268295ca093d4175dbeb8354646329e0ec08bd3a46b5028472b4d"
     },
     {
       "name": "run_dashboard.py",
