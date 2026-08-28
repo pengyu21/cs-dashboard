@@ -14,6 +14,7 @@
 실행:
   python run_dashboard.py          # 3분 간격 무한 루프
   python run_dashboard.py once     # 1회만 수집(테스트)
+  python run_dashboard.py check    # 화면 점검만(시트·알림 안 건드림)
 """
 from __future__ import annotations
 
@@ -22,7 +23,8 @@ import time
 
 from total import (BrowserHub, classify_error, claim_sheet_lock, refresh_sheet_lock,
                    release_sheet_lock, start_heartbeat, write_channel_sheet,
-                   write_dashboard,
+                   write_dashboard, _load_drift_state, _diff_item,
+                   _console_safe,
                    GangnamUnniChannel, BabitalkChannel, NaverMapChannel,
                    OnlineConsultChannel, OnlineBookingChannel, KakaoTalkChannel)
 
@@ -65,8 +67,67 @@ def one_cycle(hub: BrowserHub) -> None:
         print(f"[대시보드] 집계 오류: {classify_error(e).detail}")
 
 
+def check_pages(hub: BrowserHub) -> None:
+    """사이트 화면이 코드가 기대하는 모양 그대로인지 지금 확인해서 보여준다.
+
+    수집은 하되 시트·텔레그램은 건드리지 않는다. '이상하다' 싶을 때 사람이
+    직접 돌려보는 점검 명령. 평소에는 러너가 매 사이클 자동으로 같은 비교를
+    해서 달라진 것만 텔레그램으로 알린다(total.py check_page_changes).
+
+    ※ 출력은 전부 _console_safe 를 거친다 — 지문 값은 사이트에서 읽어온
+      글자라 윈도우 콘솔(cp949)이 못 찍는 문자가 섞여 있을 수 있다.
+    """
+    def p(text: str = "") -> None:
+        print(_console_safe(text))
+
+    saved = (_load_drift_state()).get("sig", {})
+    p()
+    p("=" * 60)
+    p("화면 점검 · 기준(마지막 저장 지문) 대비 현재 화면")
+    p("=" * 60)
+    for ch in CHANNELS:
+        try:
+            items = hub.collect(ch)
+        except Exception as e:
+            p(f"\n[{ch.name}] 수집 실패 · {classify_error(e).detail}")
+            continue
+        sig = getattr(ch, "signature", None) or {}
+        if not sig:
+            p(f"\n[{ch.name}] 신규 {len(items)}건 · (화면 지문 미등록 채널)")
+            continue
+        old = saved.get(ch.key) or {}
+        diffs = []
+        for k, v in sig.items():
+            diffs += _diff_item(k, old[k], v) if k in old else []
+        p(f"\n[{ch.name}] 신규 {len(items)}건 · 표에 보인 행 "
+          f"{len(getattr(ch, 'row_keys', []) or [])}개")
+        for k, v in sig.items():
+            shown = ", ".join(map(str, v)) if isinstance(v, list) else str(v)
+            p(f"   - {k}: {shown[:150]}")
+        if diffs:
+            p("   [달라짐] 기준과 다른 점:")
+            for d in diffs:
+                p("     " + d)
+        elif old:
+            p("   [OK] 기준과 동일")
+        else:
+            p("   (기준 없음 · 수집기가 한 사이클 돌면 기준이 만들어집니다)")
+    p()
+    p("=" * 60)
+    p("※ 시트·텔레그램은 건드리지 않았습니다.")
+
+
 def main() -> None:
     once = "once" in sys.argv[1:]
+
+    # 화면 점검만: 잠금·하트비트·시트 없이 브라우저만 띄워 비교하고 끝낸다
+    if "check" in sys.argv[1:]:
+        hub = BrowserHub(headless=False).start()
+        try:
+            check_pages(hub)
+        finally:
+            hub.quit()
+        return
 
     # 다중 PC 중복 실행 차단 — 두 대가 같은 시트를 쓰면 서로를 '실패'로 덮어쓴다
     ok, owner = claim_sheet_lock()

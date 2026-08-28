@@ -175,6 +175,18 @@ class Consultation:
 # ══════════════════════════════════════════════════════════════
 # 상주 브라우저 원격 디버깅 포트: 다른 Chrome(다른 계정)과 안 겹치게 '전용 비표준 포트' 사용.
 # 흔한 9222 를 쓰면 CS PC의 개인 Chrome(다른 네이버 계정)에 잘못 붙을 수 있어 피함.
+# 콘솔이 못 찍는 글자 하나 때문에 수집이 틀어지지 않게 한다.
+# 윈도우 기본 콘솔은 cp949 라 '—'(em dash)·이모지에서 UnicodeEncodeError 가 난다.
+# 그 print 가 로그인 흐름 안에 있으면 예외가 위로 올라가 '진짜 실패 사유'를
+# 인코딩 오류 문구로 덮어버린다(실측: 로그인 실패 사유가 통째로 사라졌다).
+#   · encoding 은 건드리지 않는다 — utf-8 로 바꾸면 cp949 콘솔에서 한글이 깨진다.
+#   · errors 만 'replace' 로 → 못 찍는 글자만 '?' 가 되고 한글은 그대로 나온다.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 CHROME_DEBUG_PORT = 9764
 COLLECTOR_LOCK_PORT = 9765      # 수집기 단일 실행 보장용(실제 통신은 안 함)
 
@@ -847,6 +859,14 @@ class BaseChannel(ABC):
         self._lookup_note = ""      # 폼 조회가 막힌 이유(알림창/예외)
         self.login_attempted = True  # '제출까지 갔는지' — 실패 시 백오프 길이를 가른다
         self._login_rejected = False  # 확인 중 '계정 거부' alert 을 봤는지
+        # ── 사이트 개편 감지용(아래 check_page_changes) ──────────
+        # scrape 도중 '화면의 뼈대'(표 머리글·메뉴 이름·있어야 할 요소)를 여기
+        # 적어두면, 러너가 지난 사이클의 지문과 비교해 달라진 것만 알려준다.
+        # 비워두면 그 채널은 감시 대상이 아니다(채널마다 하나씩 붙여 나가면 된다).
+        self.signature: Dict[str, object] = {}
+        # 이번에 화면에서 본 '데이터 행'의 지문(수집 대상이었는지와 무관).
+        # '새 행은 계속 들어오는데 수집은 0건' 을 잡는 데 쓴다.
+        self.row_keys: List[str] = []
 
     # 외부 진입점: 데모면 가짜, 아니면 셀레니움 수집
     def collect(self) -> List[Consultation]:
@@ -1756,6 +1776,12 @@ class BabitalkChannel(BaseChannel):
                      for t in driver.find_elements(By.CSS_SELECTOR, "thead th")]
         except Exception:
             heads = []
+        # 개편 감지용 지문 — 머리글이 늘거나 줄거나 순서가 바뀌면 알림이 간다.
+        # ⚠️ 못 읽은 사이클(렌더 지연 등)에는 '갱신하지 않는다'. 빈 값으로 덮으면
+        #    '머리글이 전부 없어졌다'는 오알림이 나간다. 진짜로 못 읽는 상황은
+        #    아래 폴백 경고와 칸 모양 검사(_check_shapes)가 따로 잡는다.
+        if [h for h in heads if h]:
+            self.signature["표 머리글"] = [h for h in heads if h]
         idx = []
         for want in self.SHEET_COLS:
             w = self._norm_head(want)
@@ -1770,6 +1796,38 @@ class BabitalkChannel(BaseChannel):
             print(f"[{self.name}] 표 열 매핑: {idx}")
         return idx
 
+    # ── 칸 모양 검사 ───────────────────────────────────────────
+    # 머리글 매핑이 어긋났을 때(머리글 이름까지 바뀐 개편 등) '값의 생김새'로
+    # 한 번 더 잡는다. 밀린 채로 시트를 덮어쓰면 되돌리기 어려우므로,
+    # 어긋나면 수집을 실패시켜 시트를 지키고 텔레그램으로 사유를 알린다.
+    #   (cols 인덱스, 사람이 읽는 이름, 판정 함수 이름)
+    SHAPE_CHECKS = ((2, "연락처", "_looks_phone"),
+                    (14, "신청일시", "_looks_datetime"))
+    SHAPE_MIN_SAMPLES = 3        # 이만큼 값이 있어야 판정(행이 적으면 판정 보류)
+
+    @staticmethod
+    def _looks_phone(v: str) -> bool:
+        # 마스킹된 번호(010-****-1234)도 통과하도록 '숫자 개수'로만 본다
+        return len(re.sub("[^0-9]", "", v)) >= 6
+
+    @staticmethod
+    def _looks_datetime(v: str) -> bool:
+        return bool(re.match("[0-9]{4}[-./][0-9]{1,2}[-./][0-9]{1,2}", v.strip()))
+
+    def _check_shapes(self, rows: List[List[str]]) -> None:
+        """수집 대상 여부와 무관하게 '모든 데이터 행'을 놓고 칸이 밀렸는지 본다.
+        절반 넘게 모양이 어긋나면 예외 → Hub/러너가 시트를 건드리지 않는다."""
+        for ci, label, fname in self.SHAPE_CHECKS:
+            vals = [r[ci].strip() for r in rows if ci < len(r) and r[ci].strip()]
+            if len(vals) < self.SHAPE_MIN_SAMPLES:
+                continue
+            ok = sum(1 for v in vals if getattr(self, fname)(v))
+            if ok * 2 <= len(vals):          # 절반 이하만 정상 = 밀린 것으로 본다
+                raise RuntimeError(
+                    f"표의 '{label}' 칸 내용이 예상과 다릅니다"
+                    f"({len(vals)}건 중 {ok}건만 정상, 예: {vals[0][:30]!r}) · "
+                    f"사이트 열 구성이 바뀐 것 같습니다. 시트는 건드리지 않았습니다.")
+
     def scrape(self, driver) -> List[dict]:
         """/ask 테이블에서 CS메모(O열) 비어있는 신규(=CS 미확인)만 B~Q로 추출. 실패 시 예외."""
         from selenium.webdriver.common.by import By
@@ -1782,7 +1840,7 @@ class BabitalkChannel(BaseChannel):
 
         tdx = self._td_index(driver)            # 시트 칸 → 표 td 번호
         rows = driver.find_elements(By.CSS_SELECTOR, "tbody.MuiTableBody-root tr")
-        out = []
+        out, all_rows = [], []                  # all_rows: 모양 검사·행 지문용(전체)
         for row in rows:
             tds = row.find_elements(By.TAG_NAME, "td")
             if len(tds) < self.MIN_COLS:        # 데이터 행이 아니면(빈행/그룹행) 스킵
@@ -1804,6 +1862,7 @@ class BabitalkChannel(BaseChannel):
             # 실데이터 아닌 빈 행(고객정보·이벤트명 둘 다 없음) → 스킵
             if not cols[1].strip() and not cols[3].strip():
                 continue
+            all_rows.append(cols)               # 걸러지기 전 '표에 보인 모든 행'
             # CS메모칸: 미작성(신규)이면 '+' 버튼만 있으므로, 버튼/아이콘을 뺀
             # '실제 메모 텍스트'로 다시 채워 판정·기록한다(시트 O열도 깨끗해짐).
             memo_td = tdx[self.CSMEMO_COL]
@@ -1814,6 +1873,11 @@ class BabitalkChannel(BaseChannel):
             if cols[self.CSMEMO_COL].strip():
                 continue
             out.append({"cols": cols})
+
+        # 걸러진 뒤가 아니라 '표에 보인 전부'로 검사한다 — 이번 사고처럼 전부
+        # 걸러져 0건이 되면, 결과만 봐서는 밀렸는지 한가한지 구분할 수 없다.
+        self._check_shapes(all_rows)
+        self.row_keys = [f"{c[1]}|{c[14]}" for c in all_rows]
 
         # 충전잔액(E1) — money-box-container(고정 클래스)의 '원' 금액.
         # ※ 사이드바가 접혀 화면에 안 보이면 .text 가 빈 값이라, textContent(숨김 여부
@@ -1979,9 +2043,40 @@ class GangnamUnniChannel(BaseChannel):
         # 필요시 self._set_page_size(driver, "100") 로 확대 가능.
         time.sleep(1.2)
 
+        # ── 개편 감지용 지문 ─────────────────────────────────
+        # 상담표 머리글 + 사이드바 메뉴 이름. 메뉴가 사라지거나 이름이 바뀌면
+        # (이번 '채팅상담 뱃지 삭제' 같은 개편) 그날 바로 알림이 간다.
+        # ⚠️ 빈 값이면 갱신하지 않는다 — 못 읽은 사이클에 '전부 없어졌다'는
+        #    오알림이 나가는 것을 막는다(바비톡 쪽과 같은 이유).
+        _heads = [re.sub("[ .]+", "", t.get_attribute("textContent") or "")
+                  for t in driver.find_elements(
+                      By.CSS_SELECTOR, "thead.ant-table-thead th")
+                  if (t.get_attribute("textContent") or "").strip()]
+        if _heads:
+            self.signature["상담표 머리글"] = _heads
+        try:
+            # ⚠️ 숫자가 든 줄은 뺀다 — 사이드바 맨 위 잔액('1,911,070 원')이나
+            #    뱃지 숫자가 섞이면 값이 바뀔 때마다 '메뉴가 바뀌었다'고 오알림이
+            #    간다. 메뉴 이름에는 숫자가 없다.
+            _menu = driver.execute_script(
+                "var a=document.querySelector('aside')||document.querySelector('nav');"
+                "if(!a) return [];"
+                "return (a.innerText||'').split(String.fromCharCode(10))"
+                "  .map(function(x){return x.trim();})"
+                "  .filter(function(x){return x && x.length<20"
+                "                       && !/[0-9]/.test(x);});") or []
+            if _menu:
+                self.signature["사이드바 메뉴"] = _menu
+        except Exception:
+            pass
+
         rows = driver.find_elements(
             By.CSS_SELECTOR,
             "tbody.ant-table-tbody tr.ant-table-row.ant-table-row-level-0")
+        # 표에 보인 모든 행의 지문(신규 여부와 무관) — '새 행은 들어오는데
+        # 수집은 계속 0건' 을 러너가 알아채는 데 쓴다(check_silent_zero).
+        self.row_keys = [k for k in
+                         (r.get_attribute("data-row-key") for r in rows) if k]
         out = []
         for row in rows:
             tds = row.find_elements(By.TAG_NAME, "td")
@@ -2131,6 +2226,12 @@ class GangnamUnniChannel(BaseChannel):
         WebDriverWait(driver, 20).until(EC.presence_of_element_located(
             (By.XPATH, f"//*[contains(text(),'{self.CHAT_FILTER}')]")))
         time.sleep(1.2)
+
+        # 개편 감지용 지문 — '답변안한 메시지' 필터가 사라지면 바로 알린다
+        # (이 필터가 없으면 채팅 수집은 통째로 포기하게 되어 있다).
+        self.signature["채팅 필터"] = (
+            "있음" if driver.find_elements(
+                By.XPATH, f"//*[contains(text(),'{self.CHAT_FILTER}')]") else "없음")
 
         if not self._check_unanswered(driver):
             # 필터 없이 읽으면 전체 대화가 미확인으로 쏟아진다 → 이번 사이클은 포기
@@ -2322,6 +2423,8 @@ class GangnamUnniChannel(BaseChannel):
             self._set_page_size(driver, "100")
 
         idx = self._qna_col_index(driver)
+        if idx:
+            self.signature["Q&A 머리글"] = list(idx)  # 개편 감지용(빈값이면 유지)
         FALLBACK = {"No": 0, "이벤트id": 1, "이벤트명": 2,
                     "작성일": 3, "내용": 4, "답변상태": 5}
 
@@ -3536,6 +3639,10 @@ class CollectError:
 # (판정 키워드, 표시 사유) — 위에서부터 먼저 맞는 규칙을 쓴다
 _ERROR_RULES = [
     (("quota exceeded", "rate_limit_exceeded", "resource_exhausted"), "시트 쿼터 초과"),
+    # 칸 모양 검사(_check_shapes)에 걸린 경우 — '수집 오류'로 뭉뚱그리면
+    # 시트만 보고는 사이트가 바뀐 건지 일시 오류인지 알 수 없다.
+    (("열 구성이 바뀐", "칸 내용이 예상과",
+      "체크박스를 켜지 못"), "화면 바뀜"),
     (("백오프",), "로그인 대기"),
     (("자동 로그인", "로그인 실패", "login"), "로그인 실패"),
     (("timeout", "timed out", "시간초과"), "시간 초과"),
@@ -3550,15 +3657,24 @@ _ERROR_RULES = [
 
 
 def classify_error(exc: BaseException) -> CollectError:
-    """예외 → (짧은 사유, 원문). 어디에 걸렸는지 화면만 보고 알 수 있게 한다."""
-    msg = (str(exc) or "").strip() or exc.__class__.__name__
-    low = msg.lower()
+    """예외 → (짧은 사유, 원문). 어디에 걸렸는지 화면만 보고 알 수 있게 한다.
+
+    ⚠️ 예외 '클래스 이름'까지 보고 판정한다. 셀레니움 TimeoutException 은
+       str(e) 가 'Message: ' 한 줄뿐이라 본문만 보면 어떤 규칙에도 안 걸려
+       '수집 오류 / 내용 없음' 으로 나왔다 — 사이트가 개편돼 목록이 안 뜨는,
+       가장 흔하고 가장 중요한 실패가 하필 제일 안 보였다."""
+    cls = exc.__class__.__name__
+    raw = (str(exc) or "").strip()
+    # 셀레니움은 내용 없이 'Message:' 만 담아 오기도 한다 → 그럴 땐 본문으로 안 친다
+    msg = raw if raw.replace("Message:", "").strip() else ""
+    low = f"{cls} {msg}".lower()
     kind = "수집 오류"
     for keys, label in _ERROR_RULES:
         if any(k in low for k in keys):
             kind = label
             break
-    return CollectError(kind, f"{exc.__class__.__name__}: {msg.splitlines()[0][:180]}")
+    body = msg.splitlines()[0][:180] if msg else "화면에서 기다리던 요소가 나타나지 않았습니다"
+    return CollectError(kind, f"{cls}: {body}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -3980,6 +4096,155 @@ def notify_new_and_failures(detail_rows: list, failed: list,
     _save_notify_state(state)
 
 
+# ══════════════════════════════════════════════════════════════
+# [개편 감지]  화면 구조가 바뀌면 '그 사이클에' 알린다
+# ══════════════════════════════════════════════════════════════
+# 왜 필요한가(실제 사고 두 건):
+#   · 바비톡이 표에 '예약 관리' 열을 끼워 넣어 그 뒤 열이 한 칸씩 밀렸다.
+#     코드는 예외 없이 잘 돌았고, 다만 CS메모 대신 '소진'(금액)을 읽어
+#     금액은 늘 값이 있으니 모든 행을 '메모 있음'으로 걸러 신규가 0건이 됐다.
+#   · 강남언니가 사이드바 '채팅상담' 메뉴에서 숫자 뱃지를 없앴다. 뱃지가 1 이상일
+#     때만 채팅을 수집하도록 돼 있어서, 채팅 수집이 통째로 꺼진 채 방치됐다.
+# 둘 다 '예외'가 아니라 조용한 오작동이라 기존 수집 실패 알림에 안 걸렸다.
+# 사람이 우연히 눈치챌 때까지 갔다 → 그래서 아래 두 개의 그물을 둔다.
+#
+#   1) 구조 지문(check_page_changes)
+#      채널이 매 수집마다 화면 뼈대를 self.signature 에 적어둔다.
+#      지난번과 다르면 '무엇이 어떻게 달라졌는지'를 텔레그램으로 1회 알린다.
+#      → 개편 당일에 알게 된다. 코드가 아직 안 깨졌어도 미리 본다.
+#   2) 조용한 0건(check_silent_zero)
+#      지문이 그대로여도 '판정 기준'만 바뀌는 개편이 있을 수 있다.
+#      '화면엔 새 행이 들어왔는데 수집은 0건' 이 연속되면 알린다.
+#      새 행이 실제로 들어온 사이클만 세므로, 한가해서 0건인 날엔 안 울린다.
+SIGNATURE_PATH = BASE_DIR / "page_signature.json"
+SILENT_ZERO_STRIKES = 5      # '새 행 있는데 0건' 이 몇 번 이어지면 알릴지
+SILENT_ZERO_RENOTIFY_H = 24  # 같은 채널 재알림 최소 간격(시간)
+
+
+def _console_safe(text: str) -> str:
+    """콘솔(cp949)에 찍어도 안전한 문자열로. 텔레그램용 원문은 건드리지 않는다.
+
+    윈도우 기본 콘솔은 cp949 라 이모지·em dash 를 못 찍고 UnicodeEncodeError 를
+    낸다. 알림을 찍다가 수집 사이클이 죽는 일이 없도록 여기서 한 번 거른다."""
+    t = (text or "").replace("<b>", "").replace("</b>", "").replace("<i>", "")
+    t = t.replace("</i>", "")
+    try:
+        enc = sys.stdout.encoding or "utf-8"
+    except Exception:
+        enc = "utf-8"
+    return t.encode(enc, "replace").decode(enc, "replace")
+
+
+def _load_drift_state() -> dict:
+    """{'sig': {채널키: 지문}, 'zero': {채널키: {rows, strikes, notified}}}"""
+    try:
+        d = json.loads(SIGNATURE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        d = {}
+    d.setdefault("sig", {})
+    d.setdefault("zero", {})
+    return d
+
+
+def _save_drift_state(d: dict) -> None:
+    try:
+        SIGNATURE_PATH.write_text(
+            json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        print(f"[개편감지] 지문 저장 실패: {e}")
+
+
+def _diff_item(label: str, old, new) -> List[str]:
+    """지문 항목 하나의 '사람이 읽는' 변경 설명. 같으면 빈 목록."""
+    if old == new:
+        return []
+    if isinstance(old, list) and isinstance(new, list):
+        added = [x for x in new if x not in old]
+        gone = [x for x in old if x not in new]
+        body = []
+        if added:
+            body.append(f"  + 생김: {', '.join(map(str, added))}")
+        if gone:
+            body.append(f"  - 없어짐: {', '.join(map(str, gone))}")
+        if not body:                       # 항목은 그대로인데 순서만 바뀐 경우
+            body.append(f"  ~ 순서 바뀜: {' / '.join(map(str, new))}")
+        return [f"<b>{_esc_html(label)}</b>"] + [_esc_html(b) for b in body]
+    return [f"<b>{_esc_html(label)}</b>",
+            _esc_html(f"  {old} -> {new}")]
+
+
+def check_page_changes(results: list) -> None:
+    """채널이 남긴 화면 지문을 지난번과 비교해, 달라진 것만 1회 알린다.
+
+    · 처음 보는 채널/항목은 조용히 배우기만 한다(첫 실행 알림 폭탄 방지).
+    · 알린 뒤 새 지문을 기준으로 저장한다 → 같은 변경으로 계속 울리지 않는다.
+    · 수집이 실패한 채널은 화면을 제대로 못 봤을 수 있으니 건너뛴다.
+    · 이번에 확인 못 한 항목(예: Q&A 를 건너뜀)은 '없어짐' 으로 보지 않는다."""
+    state = _load_drift_state()
+    sigs, msgs = state["sig"], []
+    for ch, items in results:
+        if isinstance(items, CollectError) or items is None:
+            continue
+        sig = getattr(ch, "signature", None) or {}
+        if not sig:
+            continue
+        old = sigs.get(ch.key) or {}
+        lines = []
+        for k, v in sig.items():
+            if k in old:                    # 처음 보는 항목은 배우기만 한다
+                lines += _diff_item(k, old[k], v)
+        merged = dict(old)
+        merged.update(sig)                  # 이번에 못 본 항목은 이전 값을 유지
+        sigs[ch.key] = merged
+        if lines:
+            msgs.append(f"🧬 <b>{_esc_html(ch.name)} 화면 구조 변경</b>\n"
+                        + "\n".join(lines))
+    _save_drift_state(state)
+    for m in msgs:
+        print(_console_safe(m))
+        send_telegram(m + "\n\n<i>수집 건수가 갑자기 0건이 되거나 시트 칸이 "
+                          "밀리지 않았는지 확인하세요.</i>" + _collector_footer())
+
+
+def check_silent_zero(results: list) -> None:
+    """'화면엔 새 행이 들어왔는데 수집은 0건' 이 이어지면 알린다.
+
+    구조 지문이 못 잡는 개편 — 머리글은 그대로인데 '신규' 판정 기준(빈 메모칸의
+    모양 등)만 바뀐 경우 — 를 결과 쪽에서 잡는 마지막 그물이다.
+    새 행이 실제로 들어온 사이클만 세기 때문에, 상담이 없어서 0건인 날에는
+    한 번도 세지 않는다(= 안 울린다)."""
+    state = _load_drift_state()
+    zero, now = state["zero"], time.time()
+    for ch, items in results:
+        if isinstance(items, CollectError) or items is None:
+            continue
+        keys = list(getattr(ch, "row_keys", None) or [])
+        if not keys:                        # 행 지문을 안 남기는 채널은 감시 안 함
+            continue
+        rec = zero.get(ch.key) or {}
+        prev = set(rec.get("rows") or [])
+        fresh = [k for k in keys if k not in prev]
+        rec["rows"] = keys[:60]
+        if items:                           # 한 건이라도 잡았으면 정상 — 초기화
+            rec["strikes"] = 0
+        elif prev and fresh:                # 새 행이 들어왔는데 0건
+            rec["strikes"] = int(rec.get("strikes", 0)) + 1
+        zero[ch.key] = rec
+        if (rec.get("strikes", 0) >= SILENT_ZERO_STRIKES
+                and now - float(rec.get("notified") or 0)
+                >= SILENT_ZERO_RENOTIFY_H * 3600):
+            msg = (f"🕳 <b>{_esc_html(ch.name)} 신규 0건이 계속됩니다</b>\n"
+                   f"화면에는 새 상담이 {rec['strikes']}번 들어왔는데 수집은 "
+                   f"계속 0건입니다.\n"
+                   f"<i>사이트 개편으로 '신규' 판정 기준이 바뀌었을 수 있습니다 — "
+                   f"화면과 시트를 맞춰 보세요.</i>")
+            print(_console_safe(msg))
+            if send_telegram(msg + _collector_footer()):
+                rec["notified"] = now
+                rec["strikes"] = 0
+    _save_drift_state(state)
+
+
 def write_dashboard(results: list) -> None:
     """
     results: [(channel, items|None)]  (None=이번 사이클 수집 실패)
@@ -4054,6 +4319,13 @@ def write_dashboard(results: list) -> None:
         notify_new_and_failures(detail[1:], failed, total_unread=total)   # 헤더 제외
     except Exception as e:
         print(f"[텔레그램] 알림 처리 오류: {e}")
+
+    # 사이트 개편 감지(화면 구조 변경 · 조용한 0건). 실패해도 시트 기록은 계속.
+    for _fn in (check_page_changes, check_silent_zero):
+        try:
+            _fn(results)
+        except Exception as e:
+            print(f"[개편감지] {_fn.__name__} 오류: {e}")
 
     # 외부 writer 탐지: 지난번 내가 쓴 스탬프가 그대로 남아있어야 정상이다.
     # 다르면 이 잠금을 모르는 다른 프로그램(옛 빌드 등)이 덮어쓰고 있다는 뜻.
