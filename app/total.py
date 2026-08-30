@@ -1988,6 +1988,12 @@ class GangnamUnniChannel(BaseChannel):
     MEMO_AUTO_TAIL = "[선택한 옵션]"     # 이 줄부터 끝까지는 이벤트명·옵션가(자동)
     MEMO_AUTO_MARK = "시스템 기록"        # 예: '[예약취소] … (2026.08.31 06:02 - 시스템 기록)'
 
+    # 이 상태의 행은 메모가 비어 있어도 미상담으로 세지 않는다.
+    # '내원안함' = 예약이 이미 취소·무산된 건이라 CS 가 응대할 대상이 아니다
+    # (메모칸에는 시스템이 남긴 '[예약취소] …' 기록만 있는 경우가 많다).
+    # 비교 전에 공백을 지우므로 '내원 안함' 처럼 띄어쓰기가 바뀌어도 걸린다.
+    SKIP_STATUS = {"내원안함"}
+
     _RE_CHAT_PHONE = re.compile(r"01[016-9][-\s]?\d{3,4}[-\s]?\d{4}")
     _RE_CHAT_WHEN = re.compile(
         r"(오늘|어제|그제|그저께|오전|오후)|\d{1,2}:\d{2}"
@@ -2126,6 +2132,8 @@ class GangnamUnniChannel(BaseChannel):
             if memo:                             # 사람이 쓴 메모가 있으면 → 제외
                 continue
             status = (_cell_lines(tds[4]) or [""])[0]     # 상태 = td#4 첫 줄
+            if status.replace(" ", "") in self.SKIP_STATUS:   # 내원안함 등 → 제외
+                continue
 
             applied = " ".join(_cell_lines(tds[0]))
             try:
