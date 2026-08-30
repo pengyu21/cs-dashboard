@@ -1971,6 +1971,23 @@ class GangnamUnniChannel(BaseChannel):
     CHAT_HEADERS = ["시각", "이름", "연락처", "내용", "상태"]
     # 부가 블록은 매 사이클 통째로 비우고 다시 쓴다(지난 사이클 잔재 방지)
     SHEET_CLEAR_EXTRA = (QNA_CLEAR, CHAT_CLEAR)
+
+    # ── 메모칸 자동입력 걸러내기 ──────────────────────────────
+    # (2026-08 실측) 강남언니가 상담 메모칸을 시스템 텍스트로 미리 채우도록
+    # 바꿨다. '메모하기' 버튼만 있던 빈 칸이 이제 이렇게 보인다:
+    #     희망일1: 2026/09/07 09:00
+    #     희망일2: 2026/09/07 09:30
+    #     [선택한 옵션]
+    #     별성형외과_루나코주사 이벤트
+    #     옵션가: ₩1,089,000
+    # → '메모칸에 글자가 있으면 CS가 본 것' 이라는 판정이 모든 행에 걸려
+    #   신규가 계속 0건이 됐다(바비톡 열 밀림과 같은 조용한 오작동).
+    # 사람이 쓴 메모는 항상 이 자동 줄들 사이/위에 섞여 들어오므로,
+    # 자동 줄만 걷어내고 남은 게 있으면 '처리됨' 으로 본다.
+    _RE_MEMO_AUTO = re.compile(r"^(희망일\s*\d*\s*[:：]|메모하기$)")
+    MEMO_AUTO_TAIL = "[선택한 옵션]"     # 이 줄부터 끝까지는 이벤트명·옵션가(자동)
+    MEMO_AUTO_MARK = "시스템 기록"        # 예: '[예약취소] … (2026.08.31 06:02 - 시스템 기록)'
+
     _RE_CHAT_PHONE = re.compile(r"01[016-9][-\s]?\d{3,4}[-\s]?\d{4}")
     _RE_CHAT_WHEN = re.compile(
         r"(오늘|어제|그제|그저께|오전|오후)|\d{1,2}:\d{2}"
@@ -2030,8 +2047,28 @@ class GangnamUnniChannel(BaseChannel):
         except Exception:
             pass
 
+    def _human_memo(self, td) -> str:
+        """메모칸(td#8)에서 시스템 자동입력을 걷어내고 '사람이 쓴 메모'만 돌려준다.
+
+        걷어내는 것(전부 강남언니가 자동으로 채우는 값):
+          · '희망일1: …' 같은 희망 예약일 줄
+          · '[선택한 옵션]' 아래의 이벤트명·옵션가 블록(항상 맨 끝에 붙는다)
+          · '… (2026.08.31 06:02 - 시스템 기록)' 형태의 예약취소 등 자동 기록
+          · 빈 칸일 때 뜨는 '메모하기' 버튼 라벨
+
+        남은 게 있으면 CS가 손을 댄 행 → 신규에서 제외한다."""
+        out = []
+        for line in _cell_lines(td):
+            if line.strip() == self.MEMO_AUTO_TAIL:
+                break                            # 이 아래는 전부 자동 블록
+            if self._RE_MEMO_AUTO.match(line) or self.MEMO_AUTO_MARK in line:
+                continue
+            if line.strip():
+                out.append(line.strip())
+        return " ".join(out)
+
     def scrape(self, driver) -> List[dict]:
-        """/consultation 테이블에서 '메모'(td#8)가 비어있는 신규(=CS 미확인)만. 실패 시 예외."""
+        """/consultation 테이블에서 사람이 쓴 메모가 없는 신규(=CS 미확인)만. 실패 시 예외."""
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support import expected_conditions as EC
         from selenium.webdriver.support.ui import WebDriverWait
@@ -2082,10 +2119,11 @@ class GangnamUnniChannel(BaseChannel):
             tds = row.find_elements(By.TAG_NAME, "td")
             if len(tds) < 9:                     # 메모(td#8)까지 필요
                 continue
-            # 신규 = 메모칸에 '메모하기' 버튼만 있는(=아직 메모 안 쓴) 상태.
-            #   메모가 있으면 그 텍스트가 뜨고, 없으면 '메모하기' 버튼만 뜸.
-            memo = " ".join(l for l in _cell_lines(tds[8]) if l != "메모하기")
-            if memo.strip():                     # 실제 메모 텍스트가 있으면 → 제외
+            # 신규 = 메모칸에 '사람이 쓴 메모'가 아직 없는 상태.
+            #   시스템 자동입력(희망일·선택한 옵션·예약취소 기록)은 빼고 본다.
+            #   → _human_memo 주석 참고. 안 그러면 전 행이 '처리됨' 이 된다.
+            memo = self._human_memo(tds[8])
+            if memo:                             # 사람이 쓴 메모가 있으면 → 제외
                 continue
             status = (_cell_lines(tds[4]) or [""])[0]     # 상태 = td#4 첫 줄
 
