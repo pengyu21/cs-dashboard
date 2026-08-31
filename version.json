@@ -1,13 +1,13 @@
 {
-  "version": "1.0.25",
-  "notes": "run_dashboard.py 가 깃허브 raw main 경로에서 HTTP 400 이 나 각 PC 가 v1.0.23 에 머물던 문제 — 파일 내용 변경으로 새 blob 생성(캐시 갱신)",
+  "version": "1.0.26",
+  "notes": "run_dashboard.py → runner.py 로 이름 변경 — 깃허브 raw 가 옛 경로에 HTTP 400 을 물고 있어 각 PC 업데이트가 막히던 문제 해결(새 경로로 우회)",
   "files": [
     {
       "name": "total.py",
-      "sha256": "cbabffae54a5872cb407ea9e04fcffa1fdf82ec75c4617e107a01fad344e1138"
+      "sha256": "6b0343e42b2640139ec97cc7b20bf23cf7102cbccf57d00d5bb80e37ea0fe56f"
     },
     {
-      "name": "run_dashboard.py",
+      "name": "runner.py",
       "sha256": "6ff374ce2beb7f0fd8169a2aca81f53dab3114fe7297ae075d9bb88deae66497"
     }
   ]

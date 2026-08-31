@@ -126,7 +126,7 @@ DB_PATH = BASE_DIR / "data" / "consultations.db"           # 로컬 백엔드용
 CHROME_PROFILE_DIR = BASE_DIR / "chrome_profiles"          # 채널별 로그인 유지
 HEADLESS = True                        # 수집 시 브라우저 숨김(로그인 때는 자동으로 보임)
 
-COLLECT_INTERVAL_SEC = 180             # 수집기 순회 주기(초) · run_dashboard.py 와 별개
+COLLECT_INTERVAL_SEC = 180             # 수집기 순회 주기(초) · runner.py 와 별개
 GUI_REFRESH_SEC = 30                    # GUI가 시트를 다시 읽어 화면 갱신하는 주기(초)
 
 # ── 텔레그램 알림 (새 상담 / 수집 실패) ──────────────────────────
@@ -380,7 +380,7 @@ def ensure_persistent_chrome(port: int = CHROME_DEBUG_PORT,
     """
     원격 디버깅 크롬이 안 떠 있으면 main 프로필로 '한 번' 띄운다(detached).
     이미 떠 있으면 그대로 재사용. 성공 시 True.
-    → 이후 모든 실행(run_dashboard once/연속)이 이 브라우저에 연결됨.
+    → 이후 모든 실행(runner once/연속)이 이 브라우저에 연결됨.
     """
     if _port_open("127.0.0.1", port):
         return True
@@ -4622,7 +4622,7 @@ class App(tk.Tk):
         self.card_widgets: Dict[str, Dict[str, tk.Widget]] = {}
         self._loading = False
         self._fail_detail: Dict[str, str] = {}   # 채널명 → 실패 예외 원문(비고 열)
-        self.collector_proc = None         # run_dashboard.py 백그라운드 프로세스
+        self.collector_proc = None         # runner.py 백그라운드 프로세스
 
         self.auto_var = tk.BooleanVar(value=False)  # 기본: 중지 — '수집기 켜기'로 수동 시작
         self.channel_var = tk.StringVar(value="전체")
@@ -4986,7 +4986,7 @@ class App(tk.Tk):
             text=f"대시보드 {len(items)}건 · 시트 업데이트: {updated} · "
                  f"화면 새로고침 {datetime.now():%H:%M:%S}")
 
-    # ── 수집기(run_dashboard.py) 백그라운드 실행 제어 ──────────
+    # ── 수집기(runner.py) 백그라운드 실행 제어 ──────────
     def _collector_running(self) -> bool:
         p = self.collector_proc
         return bool(p and p.poll() is None)
@@ -5192,7 +5192,11 @@ def _watch_parent(interval: float = 5.0) -> None:
 def _run_collector() -> None:
     """수집기 루프. 콘솔이 없어도(--noconsole/CREATE_NO_WINDOW) 원인을 남기도록
     stdout/stderr 을 exe 옆 collector.log 로 돌린다."""
-    import run_dashboard
+    # 파일명 주의 — 예전엔 run_dashboard.py 였다. 깃허브 raw 가 그 경로
+    # (main/app/run_dashboard.py)에 HTTP 400 을 물고 놓아주지 않아 런처가
+    # 업데이트를 통째로 취소했다(각 PC 가 v1.0.23 에 묶임). 경로를 새로
+    # 만들어 캐시를 피하려고 runner.py 로 바꿨다. 되돌리지 말 것.
+    import runner
 
     log_path = BASE_DIR / "collector.log"
     try:
@@ -5203,7 +5207,7 @@ def _run_collector() -> None:
         f = None
 
     if f is None:                       # 로그조차 못 열면 그냥 실행
-        run_dashboard.main()
+        runner.main()
         return
 
     sys.stdout = sys.stderr = f
@@ -5222,7 +5226,7 @@ def _run_collector() -> None:
         return
 
     try:
-        run_dashboard.main()
+        runner.main()
     except BaseException:
         import traceback
         traceback.print_exc()           # 크래시 원인도 로그에 남김
