@@ -15,6 +15,13 @@
   python run_dashboard.py          # 3분 간격 무한 루프
   python run_dashboard.py once     # 1회만 수집(테스트)
   python run_dashboard.py check    # 화면 점검만(시트·알림 안 건드림)
+
+※ 이 파일은 런처가 깃허브 raw 에서 그대로 받아간다(version.json 의 files 목록).
+  받다가 하나라도 실패하면 런처는 업데이트를 통째로 취소하고 조용히 구버전으로
+  실행한다 — 실제로 v1.0.24 배포 때 이 파일만 raw 의 main 경로에서 HTTP 400 이
+  나서(같은 파일을 커밋 SHA 경로로는 정상 수신) 각 PC 가 v1.0.23 에 머물렀다.
+  같은 증상이면 파일 내용을 바꿔 새 blob 을 만들고 재배포하면 캐시가 갱신된다.
+  배포 뒤에는 반드시: python release.py --verify
 """
 from __future__ import annotations
 

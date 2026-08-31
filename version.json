@@ -1,6 +1,6 @@
 {
-  "version": "1.0.24",
-  "notes": "로그인 잔류 실패 시 탭을 닫고 새 탭에서 재시도(전 채널) · 강남언니는 같은 화면 3연타 대신 새로고침 후 재시도 — 거부(비번오류·차단)는 종전대로 즉시 중단해 계정 잠김 방지",
+  "version": "1.0.25",
+  "notes": "run_dashboard.py 가 깃허브 raw main 경로에서 HTTP 400 이 나 각 PC 가 v1.0.23 에 머물던 문제 — 파일 내용 변경으로 새 blob 생성(캐시 갱신)",
   "files": [
     {
       "name": "total.py",
@@ -8,7 +8,7 @@
     },
     {
       "name": "run_dashboard.py",
-      "sha256": "fa349a92572c4c95002edc2ba491de474e5a11000fc3743881f0c81caee52002"
+      "sha256": "6ff374ce2beb7f0fd8169a2aca81f53dab3114fe7297ae075d9bb88deae66497"
     }
   ]
 }
