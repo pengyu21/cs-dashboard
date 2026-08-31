@@ -689,6 +689,41 @@ class BrowserHub:
             self.driver.switch_to.new_window("tab")
         self.tabs[ch.key] = self.driver.current_window_handle
 
+    def _recreate_tab(self, ch: "BaseChannel") -> None:
+        """채널 탭을 닫고 새 탭을 연다 — 새로고침으로 안 풀리는 상태 초기화용.
+
+        driver.get() 새로고침은 같은 탭·같은 렌더러를 그대로 재사용한다. 그래서
+        SPA 가 반쯤 죽었거나(이벤트 핸들러가 안 붙어 '로그인' 버튼이 영영 반응
+        없음) 렌더러가 멈춘 경우엔 몇 번을 새로고침해도 같은 화면만 나온다.
+        탭을 통째로 버리면 그 컨텍스트가 사라져 깨끗한 상태에서 다시 시작한다."""
+        h = self.tabs.pop(ch.key, None)
+        try:
+            if h and h in self.driver.window_handles:
+                # 마지막 남은 탭을 닫으면 브라우저가 통째로 죽는다 → 새 탭 먼저
+                if len(self.driver.window_handles) == 1:
+                    self.driver.switch_to.new_window("tab")
+                self.driver.switch_to.window(h)
+                self.driver.close()
+                rest = self.driver.window_handles
+                if rest:
+                    self.driver.switch_to.window(rest[0])   # 닫힌 창에서 빠져나온다
+        except Exception:
+            pass                                # 못 닫아도 아래에서 새 탭을 잡는다
+        self._ensure_tab(ch)
+
+    def _login_on_fresh_tab(self, ch: "BaseChannel") -> bool:
+        """새 탭에서 '딱 한 라운드만' 로그인해 본다.
+
+        새로고침 라운드(LOGIN_RESET_RETRY)는 방금 옛 탭에서 이미 다 써봤고
+        효과가 없었다. 여기서 또 돌리면 한 사이클 제출 횟수만 늘어 사이트의
+        '연속 실패 N회' 선에 가까워진다 → 새 탭에서는 한 번만 깔끔하게 시도한다."""
+        old = getattr(ch, "LOGIN_RESET_RETRY", 0)
+        try:
+            ch.LOGIN_RESET_RETRY = 0
+            return self._try_login(ch)
+        finally:
+            ch.LOGIN_RESET_RETRY = old
+
     def _open_list(self, ch: "BaseChannel") -> None:
         """목록 페이지를 완전 재로드하고, 늦게 뜨는 알림창/팝업까지 치운다."""
         self.driver.get(ch.LIST_URL)               # 새로고침 대신 완전 재로드
@@ -736,6 +771,7 @@ class BrowserHub:
 
             self._open_list(ch)
             tries = 0                              # 실제로 login() 을 부른 횟수
+            fresh_tab = False                      # '탭 새로 열고 재시도'를 이미 썼는지
             # 한 사이클에 login() 을 몇 번까지 부를지 — 채널이 정해두면 그쪽 우선.
             # (바비톡은 1: 연타가 곧 계정 차단이라 '한 사이클 한 번'이 원칙)
             max_try = int(getattr(ch, "LOGIN_TRY_PER_CYCLE", 0)
@@ -768,6 +804,23 @@ class BrowserHub:
                 # 제출까지 갔다가 거부당했으면(비번 오류·캡챠 등) 여기서 멈춘다.
                 # 제출도 못 해본 실패(폼이 안 그려짐 등)만 새로고침하고 곧장 다시.
                 if tries >= max_try or getattr(ch, "login_attempted", True):
+                    # 마지막 수단 — 거부 근거가 하나도 없이 로그인 화면만 그대로였다면
+                    # (login_stuck) 아이디/비번 문제가 아니라 탭/렌더러가 맛이 간 쪽이다.
+                    # 새로고침은 채널이 이미 다 해봤으니, 탭을 통째로 버리고 새 탭에서
+                    # 한 번만 더 해본다. 그래도 안 되면 그때 백오프.
+                    # ⚠️ 거부(비번 오류·차단 alert)일 때는 login_stuck 이 False 라
+                    #    이 길로 오지 않는다 → 연속 실패로 계정이 잠기는 일은 없다.
+                    if getattr(ch, "login_stuck", False) and not fresh_tab:
+                        fresh_tab = True
+                        print(f"[{ch.name}] 로그인 화면 잔류 — 탭을 닫고 "
+                              f"새 탭에서 마지막으로 다시 시도")
+                        self._recreate_tab(ch)
+                        self._open_list(ch)
+                        ok = self._login_on_fresh_tab(ch)
+                        self._focus_tab(ch)
+                        if ok:
+                            self._open_list(ch)    # 목록 다시 열고 위에서 재확인
+                            continue
                     raise self._login_fail(ch)
                 print(f"[{ch.name}] 로그인 화면이 준비되지 않음 "
                       f"({ch.login_error}) — 새로고침하고 곧장 다시 시도")
@@ -827,6 +880,11 @@ class BaseChannel(ABC):
     login_attempted: bool = True
     # 로그인 확인 도중 '계정 거부' alert 을 봤는가(= 다시 눌러선 안 되는 실패).
     _login_rejected: bool = False
+    # 거부 근거(alert·오류문구)가 하나도 없는데 로그인 화면만 그대로였는가.
+    # True = 아이디/비번을 거절당한 게 아니라 화면·탭이 맛이 간 쪽에 가깝다
+    #   → Hub 가 탭을 통째로 버리고 새 탭에서 마지막으로 한 번 더 해본다.
+    # 거부(비번 오류·캡챠·차단 alert)일 때는 절대 True 가 되지 않는다 → 계정 잠김 방지.
+    login_stuck: bool = False
 
     # ── 팝업 닫기 ─────────────────────────────────────────────
     # ⚠️ 페이지 본문은 절대 클릭하지 않는다. '진짜 오버레이(모달/알림/드로어)'가
@@ -859,6 +917,7 @@ class BaseChannel(ABC):
         self._lookup_note = ""      # 폼 조회가 막힌 이유(알림창/예외)
         self.login_attempted = True  # '제출까지 갔는지' — 실패 시 백오프 길이를 가른다
         self._login_rejected = False  # 확인 중 '계정 거부' alert 을 봤는지
+        self.login_stuck = False     # 거부 근거 없이 로그인 화면만 그대로였는지
         # ── 사이트 개편 감지용(아래 check_page_changes) ──────────
         # scrape 도중 '화면의 뼈대'(표 머리글·메뉴 이름·있어야 할 요소)를 여기
         # 적어두면, 러너가 지난 사이클의 지문과 비교해 달라진 것만 알려준다.
@@ -1498,6 +1557,7 @@ class BaseChannel(ABC):
         → 결과 확인 → 재클릭 → 그래도 화면이 그대로면 새로고침하고 처음부터."""
         self.login_error = ""
         self.login_attempted = False        # 아직 '제출'은 안 했다(짧은 백오프 판단용)
+        self.login_stuck = False            # 거부인지 '화면만 그대로'인지 아직 모른다
         if self._open_login_page(driver):
             return True                     # 이미 로그인됨(로그인 페이지가 튕겨냄)
 
@@ -1528,6 +1588,10 @@ class BaseChannel(ABC):
                 if i < self.LOGIN_SUBMIT_RETRY:
                     time.sleep(2)           # 클릭이 씹힌 경우 → 재클릭
 
+        # 여기까지 왔다 = 거부 alert 도 오류 문구도 없이 화면만 그대로.
+        # 새로고침·재클릭을 다 써봤으니 남은 건 '탭 자체를 새로 여는' 것뿐이다
+        # → Hub 가 이 표시를 보고 마지막으로 한 번 더 해준다(_recreate_tab).
+        self.login_stuck = True
         self.login_error = (self.login_error
                             or "로그인 화면을 넘어가지 못했습니다(클릭 후에도 잔류)")
         return False
@@ -2024,6 +2088,15 @@ class GangnamUnniChannel(BaseChannel):
     )
     FILL_WITH_KEYS = True       # 기존 동작 유지(실제 키 입력이 검증된 방식)
     FILL_PAUSE_SEC = 1.5        # 기존 흐름의 느린 입력 페이스 유지(봇 탐지 완화)
+    # 같은 화면에 '로그인'을 3연타(기본값)하던 것을 1회로 줄이고, 대신 새로고침해
+    # 폼을 새로 그린 뒤 다시 치는 라운드를 준다.
+    # 여기 오는 실패는 거부 근거가 하나도 없는 경우뿐이라(_do_login_flow 주석)
+    # 버튼을 더 눌러도 같은 화면만 나온다 — 실제로 이 채널은 새로고침을 한 번도
+    # 안 하고 3연타 후 곧장 10분을 쉬어서, 로그아웃되면 사람이 손댈 때까지
+    # 수집이 계속 밀렸다. 바비톡이 v1.0.16 에서 받은 처방과 같다.
+    # 한 사이클 최대 제출: 2회(새로고침 라운드) + 1회(새 탭) = 3회 — 기존 3연타와 동일.
+    LOGIN_SUBMIT_RETRY = 1
+    LOGIN_RESET_RETRY = 1
 
     def login(self, driver) -> bool:
         """저장된 계정으로 자동 로그인 — 클릭 단계는 BaseChannel 공통부가 처리
