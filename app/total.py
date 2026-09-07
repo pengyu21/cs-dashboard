@@ -2842,8 +2842,311 @@ class NaverMapChannel(BaseChannel):
 @register
 class YeosinTicketChannel(BaseChannel):
     key, name, color = "yeosin_ticket", "여신티켓", "#FF4757"
-    LOGIN_URL = ""   # TODO: 여신티켓 제휴점 관리자 URL
-    LIST_URL = ""    # TODO
+    LOGIN_URL = "https://plus.yeoshin.co.kr/login"
+    # 로그인 성공 시 /dashboard 로 이동한다. 목록은 좌측 '상담 신청 관리'.
+    # ?statuses=WAIT = '신청접수'만. 사이트가 서버에서 걸러주므로 전체를 훑어
+    # 거를 필요가 없다 — 클릭해야만 열리는 상세(개인정보)를 신청접수 건에만
+    # 열게 되어 사이트에 남는 '개인정보 조회 이력'도 최소가 된다.
+    LIST_URL = ("https://plus.yeoshin.co.kr/customerManagement/consultations"
+                "?statuses=WAIT")
+    WAIT_STATUS = "신청접수"
+    USER_ID, USER_PW = account("yeosin_ticket")
+
+    # 로그인 폼 — React 화면이라 <form> 태그가 아예 없다.
+    #   · 그래서 공통 후보(button[type='submit'] · input[type='submit'])로는
+    #     로그인 버튼을 영영 못 찾는다 → EXTRA_LOGIN_BUTTONS 로 직접 지정한다.
+    #   · 페이지 상단 홍보영역에도 '로그인' 글자가 있어 텍스트만으로 잡으면
+    #     엉뚱한 걸 누른다 → 버튼 클래스(ys-btn)를 함께 본다.
+    #   · 버튼은 두 칸이 다 차기 전까지 disabled 다(공통부의 '활성화 대기'가 푼다).
+    ID_SELECTORS = ("#login_id", "input[placeholder='아이디 입력']")
+    PW_SELECTORS = ("#login_password", "input[type='password']")
+    EXTRA_LOGIN_BUTTONS = (
+        ("xpath", "//button[contains(@class,'ys-btn')][normalize-space(.)='로그인']"),
+    )
+    LOGIN_URL_MARK = "/login"
+    FILL_WITH_KEYS = True       # React 제어 입력 — 값 주입만으론 폼 검증이 안 풀린다
+
+    def is_logged_in(self, driver) -> bool:
+        """좌측 관리자 메뉴가 그려져 있으면 로그인 상태.
+
+        주소만으로는 판정할 수 없다(실측): 미로그인으로 루트(/)를 열면 홍보용
+        랜딩이 뜨는데 주소에 'login'이 없어 '로그인됨'으로 오판했다.
+        → 로그인해야만 나오는 메뉴 링크의 존재로 확인한다.
+        """
+        from selenium.webdriver.common.by import By
+        if "/login" in (driver.current_url or "").lower():
+            return False
+        try:
+            return bool(driver.find_elements(
+                By.CSS_SELECTOR, "a[href*='/customerManagement/']"))
+        except Exception:
+            return False
+
+    def login(self, driver) -> bool:
+        return self._do_login_flow(driver)
+
+    # ── 시트 매핑: 목록 표 → '여신티켓' 탭 B~Q (16칸, 순서 동일) ──
+    #   B 신청일시 C 신청경로 D 신청타입 E 신청상태 F 내원일시 G 이벤트타입
+    #   H 관심이벤트 I 관심시술옵션 J 병원메모 K 신청자 L 거주국가
+    #   M 신청메신저정보 N 신청사용언어 O 채팅메신저정보 P 과금액 Q 비고
+    #   A(No)·R(채널)은 사용자 수식이라 건드리지 않는다.
+    SHEET_TAB = "여신티켓"
+    SHEET_START = "B3"
+    SHEET_CLEAR = "B3:Q1000"
+    # 시트 B~Q 순서대로의 사이트 머리글 이름.
+    # ⚠️ 열 번호를 고정으로 쓰지 않는다 — 머리글 이름으로 찾는다.
+    #    (바비톡이 표에 열 하나를 끼워 넣어 그 뒤가 전부 한 칸씩 밀렸던 사고와
+    #     같은 이유. 여기도 사이트가 언제든 열을 늘릴 수 있다.)
+    SHEET_COLS = ("신청 일시", "신청 경로", "신청 타입", "신청 상태", "내원 일시",
+                  "이벤트 타입", "관심 이벤트", "관심 시술 옵션", "병원 메모",
+                  "신청자", "거주 국가", "신청 메신저 정보", "신청 사용언어",
+                  "채팅 메신저 정보", "과금액(원)", "비고")
+    DETAIL_WAIT_SEC = 8         # 행 클릭 후 상세 패널이 그 행으로 바뀔 때까지 대기
+    PAGE_SIZE_SELECT = "select.ys-form-select-base"   # 한 페이지 표시 건수
+    PAGE_SIZE = "200"           # 선택 가능한 최대값(10·20·30·40·50·100·200)
+    # 잔액(잔여 상담포인트)은 상담 목록과 다른 화면에 있다 → 수집을 끝낸 뒤 이동.
+    BALANCE_URL = ("https://plus.yeoshin.co.kr/advertiseManagement"
+                   "/advertisements/status")
+    BALANCE_LABEL = "잔여 상담포인트"     # 같은 줄의 '잔여 애드포인트'와 구분
+
+    @staticmethod
+    def _flat(el) -> str:
+        """셀 텍스트를 한 줄로(줄바꿈 → 공백).
+        '2026.08.30\n22:34' → '2026.08.30 22:34'"""
+        return " ".join((el.text or "").split())
+
+    def _find_grid(self, driver):
+        """목록 그리드 → (헤더셀 리스트, 행 래퍼 리스트). 못 찾으면 ([], []).
+
+        <table> 이 아니라 CSS Grid 다: 컨테이너 하나 아래에 헤더 셀들이 직계
+        자식으로 깔리고, 데이터 행은 'col-span-full' 을 단 래퍼 하나로 묶여
+        그 안에 다시 셀이 들어간다. 이 표식(col-span-full)으로 둘을 가른다.
+        """
+        from selenium.webdriver.common.by import By
+        for g in driver.find_elements(By.CSS_SELECTOR, "div.grid"):
+            if "grid-cols-[" not in (g.get_attribute("class") or ""):
+                continue
+            kids = g.find_elements(By.XPATH, "./*")
+            hdr = [k for k in kids
+                   if "col-span-full" not in (k.get_attribute("class") or "")]
+            rows = [k for k in kids
+                    if "col-span-full" in (k.get_attribute("class") or "")]
+            if len(hdr) >= 10 and any(self._flat(h) == "신청 일시" for h in hdr):
+                return hdr, rows
+        return [], []
+
+    def _panel_value(self, driver, label: str) -> str:
+        """상세 패널에서 <label>이름</label> 바로 뒤 값 텍스트. 없으면 ''.
+
+        ※ 반드시 label 태그로 찾을 것 — 목록 머리글에도 '신청자' 라는 같은
+          글자의 div 가 있어서 text() 로만 찾으면 머리글을 집는다.
+        """
+        from selenium.webdriver.common.by import By
+        try:
+            els = driver.find_elements(
+                By.XPATH,
+                "//label[normalize-space()='%s']/following-sibling::*[1]" % label)
+            return self._flat(els[0]) if els else ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _fmt_phone(p: str) -> str:
+        """'+82 010-7510-1550' → '010-7510-1550'. 국가번호를 떼고 하이픈을 맞춘다."""
+        p = (p or "").strip()
+        d = "".join(ch for ch in p if ch.isdigit())
+        if p.startswith("+82"):
+            d = d[2:]                       # 국가번호 82 제거
+            if d and not d.startswith("0"):
+                d = "0" + d
+        if len(d) == 11:
+            return "%s-%s-%s" % (d[:3], d[3:7], d[7:])
+        if len(d) == 10:
+            return "%s-%s-%s" % (d[:3], d[3:6], d[6:])
+        return p
+
+    def _open_detail(self, driver, row, reg: str) -> tuple:
+        """행을 클릭해 상세 패널을 열고 (이름, 연락처) 를 읽는다. 실패 시 ('','').
+
+        왜 클릭이 필요한가: 목록의 '신청자' 칸은 마스킹돼 있다
+        ('이*미 / +82 010****1550'). 원문은 상세 패널에만 나온다.
+        ※ 상세를 여는 것은 사이트에 '개인정보 조회 이력'으로 남는다
+          → 그래서 신청접수(아직 연락 안 한 건)만 연다.
+
+        패널은 URL 이 바뀌지 않고 제자리에서 내용만 갈린다. 앞 행의 값을
+        그대로 읽는 사고를 막으려고, 패널의 '신청 일시'가 이 행의 것과
+        같아질 때까지 기다린 뒤에 읽는다.
+        """
+        try:
+            driver.execute_script("arguments[0].click();", row)
+        except Exception:
+            row.click()
+        end = time.time() + self.DETAIL_WAIT_SEC
+        while time.time() < end:
+            if self._panel_value(driver, "신청 일시") == reg:
+                break
+            time.sleep(0.3)
+        else:
+            return "", ""               # 패널이 이 행으로 안 바뀜 → 마스킹값 유지
+        # '대한민국 / 이혜미 / +82 010-7510-1550' → (이름, 연락처)
+        parts = [x.strip() for x in self._panel_value(driver, "신청자").split("/")]
+        parts = [x for x in parts if x]
+        if len(parts) < 2:              # 국가만 있거나 형식이 바뀐 경우
+            return "", ""
+        return parts[-2], self._fmt_phone(parts[-1])
+
+    def _expand_page_size(self, driver) -> None:
+        """한 페이지 표시 건수를 최대(200)로 올린다.
+
+        기본값이 10건이라 그대로 두면 신청접수가 11건째부터 2페이지로 밀려
+        조용히 빠진다. size·limit·pageSize 같은 URL 파라미터는 모두 무시당해서
+        (실측) 화면의 선택상자를 직접 바꾼다 — 목록 표시 방식만 바꾸는
+        읽기 전용 조작이라 고객 데이터는 건드리지 않는다.
+        여기서 실패해도 아래 '총 N건' 대조가 누락을 잡아낸다.
+        """
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import Select
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, self.PAGE_SIZE_SELECT)
+            if not els:
+                return
+            sel = Select(els[0])
+            if (sel.first_selected_option.get_attribute("value") or "") == self.PAGE_SIZE:
+                return
+            sel.select_by_value(self.PAGE_SIZE)
+            time.sleep(2)                   # 목록이 다시 그려질 때까지
+        except Exception:
+            pass
+
+    def _total_count(self, driver) -> Optional[int]:
+        """목록 위의 '총 9건' → 9. 못 읽으면 None."""
+        from selenium.webdriver.common.by import By
+        for el in driver.find_elements(
+                By.XPATH, "//*[starts-with(normalize-space(.), '총 ')]"):
+            m = re.fullmatch(r"총\s*([\d,]+)건", " ".join((el.text or "").split()))
+            if m:
+                return int(m.group(1).replace(",", ""))
+        return None
+
+    def scrape(self, driver) -> List[dict]:
+        """'상담 신청 관리'에서 신청 상태가 '신청접수'인 건만 수집.
+
+        BrowserHub 가 LIST_URL(?statuses=WAIT)로 이미 열어두므로 서버가 걸러준
+        목록을 읽는다. 다만 필터가 안 먹은 화면(파라미터 무시·초기화)을 그대로
+        믿으면 처리 끝난 건까지 신규로 올라가므로 행마다 상태를 다시 본다.
+        """
+        from selenium.webdriver.common.by import By
+
+        self._expand_page_size(driver)      # ※ 목록이 다시 그려지므로 반드시 먼저
+        hdr, rows = self._find_grid(driver)
+        if not hdr:
+            raise RuntimeError("상담 신청 목록의 열 구성이 바뀐 것 같습니다"
+                               " (머리글 '신청 일시'를 찾지 못함)")
+        names = [self._flat(h) for h in hdr]
+        idx = {n: i for i, n in enumerate(names) if n}
+        missing = [c for c in self.SHEET_COLS if c not in idx]
+        if missing:
+            raise RuntimeError("상담 신청 목록의 열 구성이 바뀐 것 같습니다"
+                               " (없는 머리글: %s)" % ", ".join(missing))
+
+        # 페이지가 나뉘어 뒷장을 못 읽었다면 '수집 0건'처럼 조용히 넘어가면 안 된다
+        # — 놓친 건은 대시보드에 영영 안 뜨고 시트에서도 지워진다. 예외로 알린다.
+        n = self._total_count(driver)
+        if n is not None and len(rows) < n:
+            raise RuntimeError("목록이 여러 쪽으로 나뉘어 %d건 중 %d건만 읽었습니다"
+                               % (n, len(rows)))
+
+        out = []
+        for row in rows:
+            cells = row.find_elements(By.XPATH, "./*")
+            if len(cells) < len(names):
+                continue                        # 빈 행/안내 행
+            vals = {n: self._flat(cells[i]) for n, i in idx.items()}
+            if vals.get("신청 상태") != self.WAIT_STATUS:
+                continue                        # 필터가 안 먹은 화면 대비(2차 확인)
+            reg = vals.get("신청 일시", "")
+            name, phone = self._open_detail(driver, row, reg)
+            item = {c: vals.get(c, "") for c in self.SHEET_COLS}
+            item["reg"] = reg
+            # 상세를 못 열었으면 목록의 마스킹값이라도 남긴다(빈칸보다는 낫다)
+            masked = vals.get("신청자", "").split(" ")
+            item["name"] = name or (masked[0] if masked else "")
+            item["phone"] = phone or (" ".join(masked[1:]) if len(masked) > 1 else "")
+            out.append(item)
+
+        out.sort(key=lambda x: x["reg"], reverse=True)      # 신청 최신순
+
+        # 잔액은 여기서 마지막에 읽는다 — 페이지를 옮기므로 목록 수집이 모두
+        # 끝난 뒤여야 한다. 실패해도 상담 수집 결과는 그대로 살린다
+        # (시트·대시보드의 잔액은 이전 값이 유지된다).
+        try:
+            self._read_balance(driver)
+        except Exception as e:
+            print(f"[{self.name}] 잔여 상담포인트를 읽지 못했습니다"
+                  f"(이전 값 유지): {classify_error(e).detail}")
+        return out
+
+    def _read_balance(self, driver) -> None:
+        """'광고 관리ㆍ분석' 화면의 잔여 상담포인트 → header_cells['E1'].
+
+        E1 은 채널 탭의 잔액 칸이자 대시보드 '잔액' 열로 나가는 값이다
+        (강남언니·바비톡과 같은 방식).
+        ※ 상담 목록과 다른 페이지라 여기서 화면을 옮긴다. 다음 사이클에
+          BrowserHub 가 LIST_URL 로 다시 열어주므로 되돌릴 필요는 없다.
+        """
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        driver.get(self.BALANCE_URL)
+        self.dismiss_popups(driver)
+
+        def _bal(d):
+            # 화면 구조: <div>잔여 상담포인트<a>상세 내역</a></div><p>725,000원</p>
+            # 바로 옆에 '잔여 애드포인트'(0원)가 같은 모양으로 있어서 라벨로 가른다.
+            for lab in d.find_elements(
+                    By.XPATH,
+                    "//div[starts-with(normalize-space(.), '%s')]" % self.BALANCE_LABEL):
+                for el in lab.find_elements(By.XPATH, "following-sibling::p"):
+                    m = re.search(r"[\d][\d,]*\s*원",
+                                  el.get_attribute("textContent") or "")
+                    if m:
+                        return m.group(0).strip()
+            return None
+
+        v = WebDriverWait(driver, 15).until(_bal)
+        if v:
+            self.header_cells["E1"] = v
+
+    def to_sheet_rows(self, items: list) -> list:
+        cols = self.SHEET_COLS
+        i_reg, i_visit = cols.index("신청 일시"), cols.index("내원 일시")
+        i_who = cols.index("신청자")
+        rows = []
+        for it in items:
+            r = [it.get(c, "") for c in cols]
+            r[i_reg] = _to_sheet_date(r[i_reg])
+            r[i_visit] = _to_sheet_date(r[i_visit])
+            # 신청자 칸만 마스킹 해제값으로 갈아 끼운다
+            # (목록칸은 '이*미 +82 010****1550' 이라 그대로 쓰면 쓸모가 없다)
+            r[i_who] = "\n".join(x for x in (it.get("name", ""),
+                                             it.get("phone", "")) if x)
+            rows.append(r)
+        return rows
+
+    def dashboard_rows(self, items: list) -> list:
+        # [이름, 내용=관심 시술/이벤트, 시각=신청일시, 연락처]
+        return [[it.get("name", ""),
+                 it.get("관심 시술 옵션") or it.get("관심 이벤트", ""),
+                 _to_sheet_date(it.get("reg", "")),
+                 it.get("phone", "")] for it in items]
+
+    def after_write(self, ws) -> None:
+        # 머리글은 사용자가 이미 만들어 둔 것을 그대로 둔다(덮지 않는다).
+        # 날짜 서식만 맞춘다 — B 신청일시, F 내원일시.
+        ws.format("B3:B1000", {"numberFormat": {"type": "DATE_TIME",
+                                                "pattern": "yyyy-mm-dd hh:mm"}})
+        ws.format("F3:F1000", {"numberFormat": {"type": "DATE_TIME",
+                                                "pattern": "yyyy-mm-dd hh:mm"}})
 
     def _scrape(self, driver):
         return []
@@ -3968,7 +4271,7 @@ def start_heartbeat() -> threading.Event:
 
 
 # 대시보드에 표시할 채널 순서
-DASHBOARD_ORDER = ["gangnamunni", "babitalk", "naver_map",
+DASHBOARD_ORDER = ["gangnamunni", "babitalk", "yeosin_ticket", "naver_map",
                    "online_consult", "online_booking", "kakaotalk"]
 
 
@@ -4480,6 +4783,7 @@ SHEET_STATUS_TABS = [
     ("대시보드", DASHBOARD_TAB, "D1"),
     ("강남언니", "강남언니", "A1"),
     ("바비톡", "바비톡", "A1"),
+    ("여신티켓", "여신티켓", "A1"),
     ("네이버지도", "네이버지도", "A1"),
     ("온라인상담", "온라인상담", "A1"),
     ("온라인예약", "온라인예약", "A1"),
@@ -4595,6 +4899,7 @@ COLS = [
 DASH_CHANNELS = [
     ("강남언니", "#EC4899"),
     ("바비톡", "#8B5CF6"),
+    ("여신티켓", "#FF4757"),
     ("네이버지도", "#03C75A"),
     ("온라인상담", "#1E90FF"),
     ("온라인예약", "#FF9500"),

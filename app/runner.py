@@ -32,7 +32,8 @@ from total import (BrowserHub, classify_error, claim_sheet_lock, refresh_sheet_l
                    release_sheet_lock, start_heartbeat, write_channel_sheet,
                    write_dashboard, _load_drift_state, _diff_item,
                    _console_safe,
-                   GangnamUnniChannel, BabitalkChannel, NaverMapChannel,
+                   GangnamUnniChannel, BabitalkChannel, YeosinTicketChannel,
+                   NaverMapChannel,
                    OnlineConsultChannel, OnlineBookingChannel, KakaoTalkChannel)
 
 INTERVAL_SEC = 120      # 순회 주기(초). 2분. 채널 사이트 부하·차단 위험 때문에 60초 밑은 비권장
@@ -41,6 +42,7 @@ INTERVAL_SEC = 120      # 순회 주기(초). 2분. 채널 사이트 부하·차
 CHANNELS = [
     GangnamUnniChannel(),
     BabitalkChannel(),
+    YeosinTicketChannel(),
     NaverMapChannel(),
     OnlineConsultChannel(),
     OnlineBookingChannel(),
