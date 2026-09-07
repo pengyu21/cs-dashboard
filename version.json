@@ -1,10 +1,10 @@
 {
-  "version": "1.0.29",
-  "notes": "인스타 → 인스타_잠재고객 표시명 분리 · 여신티켓 문자인증 재발송 방지",
+  "version": "1.0.30",
+  "notes": "여신티켓 상세 열기 보강 — 이름·연락처가 마스킹된 채 기록되던 문제",
   "files": [
     {
       "name": "total.py",
-      "sha256": "3a7cb2f6316bfdffffa39fb9902b77059cb355edc2696d12fc751a6af1a03539"
+      "sha256": "38a53d264d7c348957d7f1fabb5a823ecd00cfa8a5ac6755b7b0a226c8ab14dd"
     },
     {
       "name": "runner.py",

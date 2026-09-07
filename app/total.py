@@ -2925,6 +2925,8 @@ class YeosinTicketChannel(BaseChannel):
                   "신청자", "거주 국가", "신청 메신저 정보", "신청 사용언어",
                   "채팅 메신저 정보", "과금액(원)", "비고")
     DETAIL_WAIT_SEC = 8         # 행 클릭 후 상세 패널이 그 행으로 바뀔 때까지 대기
+    DETAIL_CLICK_TRY = 3        # 패널이 안 열릴 때 다시 눌러보는 횟수
+    GRID_WAIT_SEC = 20          # 목록(React)이 그려질 때까지 기다리는 시간
     PAGE_SIZE_SELECT = "select.ys-form-select-base"   # 한 페이지 표시 건수
     PAGE_SIZE = "200"           # 선택 가능한 최대값(10·20·30·40·50·100·200)
     # 잔액(잔여 상담포인트)은 상담 목록과 다른 화면에 있다 → 수집을 끝낸 뒤 이동.
@@ -2944,19 +2946,28 @@ class YeosinTicketChannel(BaseChannel):
         <table> 이 아니라 CSS Grid 다: 컨테이너 하나 아래에 헤더 셀들이 직계
         자식으로 깔리고, 데이터 행은 'col-span-full' 을 단 래퍼 하나로 묶여
         그 안에 다시 셀이 들어간다. 이 표식(col-span-full)으로 둘을 가른다.
+
+        ※ BrowserHub 는 페이지를 연 지 2초쯤 뒤에 곧바로 scrape 를 부른다.
+        React 가 아직 표를 그리는 중일 수 있으므로 '한 번 보고 없으면 포기'가
+        아니라 GRID_WAIT_SEC 동안 기다린다(실측: 화면은 멀쩡한데 수집기에서만
+        상세가 안 열려 이름·연락처가 마스킹된 채 기록됐다).
         """
         from selenium.webdriver.common.by import By
-        for g in driver.find_elements(By.CSS_SELECTOR, "div.grid"):
-            if "grid-cols-[" not in (g.get_attribute("class") or ""):
-                continue
-            kids = g.find_elements(By.XPATH, "./*")
-            hdr = [k for k in kids
-                   if "col-span-full" not in (k.get_attribute("class") or "")]
-            rows = [k for k in kids
-                    if "col-span-full" in (k.get_attribute("class") or "")]
-            if len(hdr) >= 10 and any(self._flat(h) == "신청 일시" for h in hdr):
-                return hdr, rows
-        return [], []
+        end = time.time() + self.GRID_WAIT_SEC
+        while True:
+            for g in driver.find_elements(By.CSS_SELECTOR, "div.grid"):
+                if "grid-cols-[" not in (g.get_attribute("class") or ""):
+                    continue
+                kids = g.find_elements(By.XPATH, "./*")
+                hdr = [k for k in kids
+                       if "col-span-full" not in (k.get_attribute("class") or "")]
+                rows = [k for k in kids
+                        if "col-span-full" in (k.get_attribute("class") or "")]
+                if len(hdr) >= 10 and any(self._flat(h) == "신청 일시" for h in hdr):
+                    return hdr, rows
+            if time.time() >= end:
+                return [], []
+            time.sleep(0.5)
 
     def _panel_value(self, driver, label: str) -> str:
         """상세 패널에서 <label>이름</label> 바로 뒤 값 텍스트. 없으면 ''.
@@ -3000,17 +3011,29 @@ class YeosinTicketChannel(BaseChannel):
         그대로 읽는 사고를 막으려고, 패널의 '신청 일시'가 이 행의 것과
         같아질 때까지 기다린 뒤에 읽는다.
         """
-        try:
-            driver.execute_script("arguments[0].click();", row)
-        except Exception:
-            row.click()
-        end = time.time() + self.DETAIL_WAIT_SEC
-        while time.time() < end:
-            if self._panel_value(driver, "신청 일시") == reg:
-                break
-            time.sleep(0.3)
+        # 한 번 눌러서 안 열리면 다시 누른다 — React 가 아직 클릭 핸들러를 붙이기
+        # 전이면 첫 클릭이 그냥 삼켜진다(수집기는 화면 로드 직후 바로 부른다).
+        # 목록을 여는 것뿐이라 여러 번 눌러도 사이트에 남기는 흔적은 같다.
+        for _ in range(self.DETAIL_CLICK_TRY):
+            try:
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});"
+                    "arguments[0].click();", row)
+            except Exception:
+                try:
+                    row.click()
+                except Exception:
+                    pass
+            end = time.time() + self.DETAIL_WAIT_SEC
+            while time.time() < end:
+                if self._panel_value(driver, "신청 일시") == reg:
+                    break
+                time.sleep(0.3)
+            else:
+                continue                # 안 열렸다 → 다시 눌러본다
+            break
         else:
-            return "", ""               # 패널이 이 행으로 안 바뀜 → 마스킹값 유지
+            return "", ""               # 끝내 안 열림 → 마스킹값으로 폴백
         # '대한민국 / 이혜미 / +82 010-7510-1550' → (이름, 연락처)
         parts = [x.strip() for x in self._panel_value(driver, "신청자").split("/")]
         parts = [x for x in parts if x]
@@ -3079,7 +3102,7 @@ class YeosinTicketChannel(BaseChannel):
             raise RuntimeError("목록이 여러 쪽으로 나뉘어 %d건 중 %d건만 읽었습니다"
                                % (n, len(rows)))
 
-        out = []
+        out, masked_n = [], 0
         for row in rows:
             cells = row.find_elements(By.XPATH, "./*")
             if len(cells) < len(names):
@@ -3095,7 +3118,14 @@ class YeosinTicketChannel(BaseChannel):
             masked = vals.get("신청자", "").split(" ")
             item["name"] = name or (masked[0] if masked else "")
             item["phone"] = phone or (" ".join(masked[1:]) if len(masked) > 1 else "")
+            if not name:
+                masked_n += 1           # 상세를 못 열어 마스킹값으로 남은 건수
             out.append(item)
+
+        # 마스킹된 채로 올라가면 CS 가 전화를 걸 수 없다 — 조용히 넘어가지 말고
+        # 대시보드 '비고'(F1)에 남겨 눈에 띄게 한다.
+        self.header_cells["F1"] = (f"이름·연락처 {masked_n}건 마스킹(상세 열기 실패)"
+                                   if masked_n else "")
 
         out.sort(key=lambda x: x["reg"], reverse=True)      # 신청 최신순
 
