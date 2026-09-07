@@ -1,10 +1,10 @@
 {
-  "version": "1.0.28",
-  "notes": "계정 누락 진단 — 빈 계정을 '폼 반영 실패'로 오인하던 문구 수정",
+  "version": "1.0.29",
+  "notes": "인스타 → 인스타_잠재고객 표시명 분리 · 여신티켓 문자인증 재발송 방지",
   "files": [
     {
       "name": "total.py",
-      "sha256": "ec75aba27794519cdd41a4c5ed836d485b69224fa1186b55317f179eba9ba654"
+      "sha256": "3a7cb2f6316bfdffffa39fb9902b77059cb355edc2696d12fc751a6af1a03539"
     },
     {
       "name": "runner.py",

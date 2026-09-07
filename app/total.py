@@ -2877,6 +2877,17 @@ class YeosinTicketChannel(BaseChannel):
     )
     LOGIN_URL_MARK = "/login"
     FILL_WITH_KEYS = True       # React 제어 입력 — 값 주입만으론 폼 검증이 안 풀린다
+    # 로그인 결과를 alert 으로 알려준다 → 클릭 직후 먼저 읽는다.
+    # (안 읽으면 다음 셀레니움 명령이 UnexpectedAlertPresentException 으로 죽어
+    #  '수집 오류'만 남고 진짜 사유가 사라진다 — 실측)
+    POST_SUBMIT_ALERT_SEC = 3.0
+    # ⚠️ '인증번호'를 거부어에 넣는 이유: 처음 보는 PC 에서 로그인하면
+    #    '인증번호를 문자로 보내드렸어요!' alert 이 뜨고 문자 인증을 요구한다.
+    #    자동화로는 통과할 수 없는데, 여기서 재클릭하면 그때마다 담당자 휴대폰으로
+    #    문자가 또 간다. 거부와 똑같이 즉시 중단해 문자 폭탄을 막는다.
+    REJECT_ALERT_WORDS = BaseChannel.REJECT_ALERT_WORDS + ("인증번호",)
+    LOGIN_HELP = ("그 PC 브라우저에서 여신티켓에 사람이 직접 한 번 로그인해 "
+                  "문자 인증번호를 입력해 두세요(처음 쓰는 PC 에서만 요구합니다)")
 
     def is_logged_in(self, driver) -> bool:
         """좌측 관리자 메뉴가 그려져 있으면 로그인 상태.
@@ -4287,7 +4298,10 @@ DASHBOARD_ORDER = ["gangnamunni", "babitalk", "yeosin_ticket", "naver_map",
                    "online_consult", "online_booking", "kakaotalk"]
 
 
-INSTA_TAB = "인스타"
+INSTA_TAB = "인스타"          # 시트 탭 이름 — IMPORTRANGE 로 채워지는 원본
+# 화면(대시보드·웹앱)에 보일 이름. 탭 이름과 다르다 — 탭을 건드리면 IMPORTRANGE 가
+# 깨지므로 표시 이름만 따로 둔다. 웹앱 Index.html 의 CH/URLS/ICO 키와 같아야 한다.
+INSTA_NAME = "인스타_잠재고객"
 
 
 def read_instagram_rows(sh) -> list:
@@ -4735,16 +4749,16 @@ def write_dashboard(results: list) -> None:
     #   B=이름 D=신청항목 E=연락처 F=연락여부 G=날짜, F가 FALSE(미연락)인 행만
     try:
         insta = read_instagram_rows(sh)
-        summary.append(["인스타", len(insta), "", ""])
+        summary.append([INSTA_NAME, len(insta), "", ""])
         total += len(insta)
         for r in insta:
-            detail.append(["인스타"] + list(r))
+            detail.append([INSTA_NAME] + list(r))
     except Exception as e:
         err = classify_error(e)
         print(f"[인스타] 시트 읽기 오류: {err.detail}")
-        p = prev.get("인스타", ["", "", ""])
-        summary.append(["인스타", err.kind, p[1], err.detail])
-        failed.append(("인스타", f"{err.kind} · {err.detail}"))
+        p = prev.get(INSTA_NAME, ["", "", ""])
+        summary.append([INSTA_NAME, err.kind, p[1], err.detail])
+        failed.append((INSTA_NAME, f"{err.kind} · {err.detail}"))
 
     summary.append(["합계", total, "", ""])
 
@@ -4916,7 +4930,7 @@ DASH_CHANNELS = [
     ("온라인상담", "#1E90FF"),
     ("온라인예약", "#FF9500"),
     ("카카오톡", "#E0AC00"),
-    ("인스타", "#C13584"),
+    (INSTA_NAME, "#C13584"),
 ]
 DASH_COLOR = dict(DASH_CHANNELS)
 
