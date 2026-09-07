@@ -3114,18 +3114,22 @@ class YeosinTicketChannel(BaseChannel):
             name, phone = self._open_detail(driver, row, reg)
             item = {c: vals.get(c, "") for c in self.SHEET_COLS}
             item["reg"] = reg
-            # 상세를 못 열었으면 목록의 마스킹값이라도 남긴다(빈칸보다는 낫다)
-            masked = vals.get("신청자", "").split(" ")
-            item["name"] = name or (masked[0] if masked else "")
-            item["phone"] = phone or (" ".join(masked[1:]) if len(masked) > 1 else "")
-            if not name:
-                masked_n += 1           # 상세를 못 열어 마스킹값으로 남은 건수
+            item["name"], item["phone"] = name, phone
+            if not (name and phone):
+                masked_n += 1           # 상세를 못 열어 원문을 못 얻은 건수
             out.append(item)
 
-        # 마스킹된 채로 올라가면 CS 가 전화를 걸 수 없다 — 조용히 넘어가지 말고
-        # 대시보드 '비고'(F1)에 남겨 눈에 띄게 한다.
-        self.header_cells["F1"] = (f"이름·연락처 {masked_n}건 마스킹(상세 열기 실패)"
-                                   if masked_n else "")
+        # 마스킹된 값은 아예 기록하지 않는다.
+        #   · '이*미 / 010****1550' 은 CS 가 전화를 걸 수 없어 쓸모가 없고,
+        #   · 나중에 마스킹이 풀리면 이름·연락처가 바뀌어 지문(_row_fingerprint)이
+        #     달라지므로 같은 상담이 '새 상담'으로 텔레그램에 또 알려진다.
+        # 그래서 한 건이라도 못 풀면 이번 사이클을 실패로 끊는다 — 시트는
+        # 그대로 유지되고(write_channel_sheet 은 성공했을 때만 불린다) 다음
+        # 사이클에 다시 시도한다. 반쯤 맞는 기록을 남기는 것보다 낫다.
+        if masked_n:
+            raise RuntimeError(
+                f"상세(고객 정보)를 열지 못해 이름·연락처가 가려진 건이 {masked_n}건 "
+                f"있습니다 — 마스킹된 값은 기록하지 않고 다음 사이클에 다시 시도합니다")
 
         out.sort(key=lambda x: x["reg"], reverse=True)      # 신청 최신순
 

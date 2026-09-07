@@ -1,10 +1,10 @@
 {
-  "version": "1.0.30",
-  "notes": "여신티켓 상세 열기 보강 — 이름·연락처가 마스킹된 채 기록되던 문제",
+  "version": "1.0.31",
+  "notes": "여신티켓 마스킹 값 기록 금지 — 이름·연락처를 못 풀면 기록 대신 실패 처리",
   "files": [
     {
       "name": "total.py",
-      "sha256": "38a53d264d7c348957d7f1fabb5a823ecd00cfa8a5ac6755b7b0a226c8ab14dd"
+      "sha256": "9aafc5932aa36d33992365950992bac757b602cb343b33cee87610adfc8048e8"
     },
     {
       "name": "runner.py",
