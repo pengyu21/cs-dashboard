@@ -453,7 +453,11 @@ def _to_sheet_date(s: str):
     - 날짜만: '2026-06-20' 은 그대로(날짜값 인식)
     못 맞추면 원문 유지."""
     s = (s or "").strip()
-    for fmt in ("%Y.%m.%d %H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+    # ⚠️ 2자리 연도('26-09-07 21:28')도 받는다 — 2026-09 바비톡 개편으로
+    #    '신청일' 칸이 4자리에서 2자리 연도로 바뀌었다. %Y 를 먼저 시도하므로
+    #    4자리와 섞여도 오해석되지 않는다('2026-…' 은 %y 로는 파싱되지 않는다).
+    for fmt in ("%Y.%m.%d %H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
+                "%y.%m.%d %H:%M", "%y-%m-%d %H:%M", "%y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d %H:%M")
         except (ValueError, TypeError):
@@ -475,10 +479,12 @@ def _to_sheet_date(s: str):
             return datetime(y, mo, d, h, mi).strftime("%Y-%m-%d %H:%M")
         except ValueError:
             pass
-    try:                                    # 날짜만
-        return datetime.strptime(s, "%Y-%m-%d").strftime("%Y-%m-%d")
-    except (ValueError, TypeError):
-        return s
+    for fmt in ("%Y-%m-%d", "%y-%m-%d"):    # 날짜만(2자리 연도 포함)
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            pass
+    return s
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1715,10 +1721,18 @@ class BabitalkChannel(BaseChannel):
     SHEET_TAB = "바비톡"
     SHEET_START = "B3"
     SHEET_CLEAR = "B3:Q1000"
+    # 표의 데이터 행 셀렉터. ⚠️ 클래스 이름을 박아두지 않는다.
+    #   (2026-09 실측) 사이트가 /ask 표를 MUI 에서 Tailwind + CSS모듈 자체
+    #   컴포넌트로 갈아엎으면서 'tbody.MuiTableBody-root' 가 통째로 사라졌다.
+    #   표는 16행 멀쩡히 그려지는데 이 셀렉터만 영영 안 잡혀, 로그인 확인(12초)과
+    #   스크랩(20초) 대기를 다 쓰고 TimeoutException(빈 메시지)으로 끝났다
+    #   → 매 사이클 '수집 실패(시간 초과)'. 화면에 표는 하나뿐이라 tbody tr 로
+    #   충분하고, 다음 개편에서 클래스가 또 바뀌어도 버틴다.
+    ROW_SEL = "tbody tr"
     N_COLS = 16                      # B~Q (시트 칸 수 — 표가 늘어도 이건 그대로)
     MIN_COLS = 14                    # 이보다 적으면 데이터행 아님(그룹행/빈행) → 스킵
     NAME_COL = 1                     # cols 내 '고객정보' 인덱스. 셀 첫 줄=국적(국기 라벨)
-    DATE_COL = 14                    # cols 내 '신청일시' 인덱스(→ 시트 P열)
+    DATE_COL = 14                    # cols 내 '신청일'(옛 '신청일시') 인덱스(→ 시트 P열)
     CSMEMO_COL = 13                  # cols 내 'CS메모' 인덱스(→ 시트 O열)
     # material-symbols 아이콘의 리거처 글자(아이콘인데 텍스트로 읽힌다) 제거.
     # CS현황 칸이 대표적: 실제 값 '확인'·'미내원' 사이에 화살표 아이콘 이름이 섞여
@@ -1733,11 +1747,21 @@ class BabitalkChannel(BaseChannel):
     # ('고객 코멘트 (클릭 시 전체보기)', 'EID help' 처럼 꼬리가 붙어 있어서).
     # 여기 없는 열(예: 새로 생긴 '예약 관리')은 시트에 넣지 않는다 → 기존 시트
     # 서식·수식·웹앱이 그대로 동작한다.
+    # ⚠️ '신청일시' 가 아니라 '신청일' 로 찾는다 — 2026-09 개편에서 머리글이
+    #    '신청일' 로 짧아졌다. 앞부분 일치라 옛 '신청일시' 화면에도 그대로 맞는다.
+    #    'EID' 는 열 자체가 없어져(번호가 '이벤트명/의사명' 칸 첫 줄로 들어왔다)
+    #    -1 = 시트 빈칸이 되므로, 아래 _split_eid 가 다시 갈라 넣는다.
     SHEET_COLS = ("CS현황", "고객 정보", "연락처", "이벤트명/의사명", "유입경로",
                   "플랫폼 종류", "EID", "상담요청시각", "부위/시술", "고객 코멘트",
-                  "문자발송", "상담 신청 단가", "소진", "CS메모", "신청일시", "비고")
-    # 머리글을 못 읽었을 때 쓸 표 열 번호(2026-08 실측 화면 기준, '예약 관리'=8 제외)
-    FALLBACK_TD = (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16)
+                  "문자발송", "상담 신청 단가", "소진", "CS메모", "신청일", "비고")
+    # 머리글을 못 읽었을 때 쓸 표 열 번호(2026-09 실측 17칸 화면 기준).
+    #   0 CS현황 1 신청일 2 고객정보 3 연락처 4 유입경로 5 이벤트명/의사명
+    #   6 플랫폼종류 7 예약관리 8 부위/시술 9 고객코멘트 10 상담요청시각
+    #   11 상담신청단가 12 소진 13 비고 14 고객관리 15 문자발송 16 CS메모
+    # (시트에 안 넣는 '예약관리'·'고객관리' 와 없어진 'EID'(-1)는 제외)
+    FALLBACK_TD = (0, 2, 3, 5, 4, 6, -1, 10, 8, 9, 15, 11, 12, 16, 1, 13)
+    EID_COL = 6                      # cols 내 'EID' 인덱스(→ 시트 H열)
+    EVENT_COL = 3                    # cols 내 '이벤트명/의사명' 인덱스(→ 시트 E열)
 
     def is_logged_in(self, driver) -> bool:
         """현재 탭 기준 판별(네비게이션은 Hub가 수행). SPA 정착까지 대기."""
@@ -1747,7 +1771,7 @@ class BabitalkChannel(BaseChannel):
             WebDriverWait(driver, 12).until(lambda d:
                 "/login" in d.current_url
                 or d.find_elements(By.CSS_SELECTOR, "input[placeholder='ID']")
-                or d.find_elements(By.CSS_SELECTOR, "tbody.MuiTableBody-root tr"))
+                or d.find_elements(By.CSS_SELECTOR, self.ROW_SEL))
         except Exception:
             pass
         return ("/login" not in driver.current_url
@@ -1836,10 +1860,27 @@ class BabitalkChannel(BaseChannel):
         return " ".join(t for t in (txt or "").split()
                         if t not in ("add", "+", "arrow_right", "note_add", "edit"))
 
-    @staticmethod
-    def _norm_head(s: str) -> str:
-        """머리글 비교용 정규화 — 공백 제거 + 꼬리 아이콘 글자('help') 제거."""
-        return re.sub(r"help$", "", re.sub(r"\s+", "", s or ""))
+    # 머리글에 같이 읽히는 아이콘 리거처(정렬 화살표·도움말 등).
+    # 공백을 지우고 나면 이름에 눌어붙는다:
+    #   '신청일 keyboard_arrow_up keyboard_arrow_down' → '신청일keyboard_arrow_up…'
+    HEAD_ICONS = ("keyboard_arrow_up", "keyboard_arrow_down",
+                  "keyboard_arrow_left", "keyboard_arrow_right",
+                  "arrow_drop_up", "arrow_drop_down", "arrow_upward",
+                  "arrow_downward", "unfold_more", "swap_vert",
+                  "expand_more", "expand_less", "help")
+
+    @classmethod
+    def _norm_head(cls, s: str) -> str:
+        """머리글 비교용 정규화 — 공백 제거 + 아이콘 글자 제거.
+
+        (2026-09 실측) '신청일' 열이 정렬 가능해지면서 머리글이
+        '신청일keyboard_arrow_upkeyboard_arrow_down' 으로 읽혔다. 아이콘을 떼지
+        않으면 이름이 어디에도 매치되지 않아 열 매핑이 통째로 폴백으로 떨어지고,
+        개편감지 지문도 매 사이클 흔들려 헛알림이 나간다."""
+        t = re.sub(r"\s+", "", s or "")
+        for w in cls.HEAD_ICONS:
+            t = t.replace(w, "")
+        return t
 
     def _td_index(self, driver) -> List[int]:
         """시트 칸(B~Q) 순서 → 실제 표의 td 번호. 머리글을 못 읽으면 FALLBACK_TD.
@@ -1888,7 +1929,27 @@ class BabitalkChannel(BaseChannel):
 
     @staticmethod
     def _looks_datetime(v: str) -> bool:
-        return bool(re.match("[0-9]{4}[-./][0-9]{1,2}[-./][0-9]{1,2}", v.strip()))
+        # 연도는 2자리('26-09-07')·4자리('2026-09-07') 둘 다 정상으로 본다
+        # — 2026-09 개편으로 '신청일' 칸이 2자리 연도로 바뀌었다. 4자리만
+        #   받으면 멀쩡한 화면을 '열이 밀렸다'고 오판해 수집을 실패시킨다.
+        return bool(re.match(r"[0-9]{2}(?:[0-9]{2})?[-./][0-9]{1,2}[-./][0-9]{1,2}",
+                             v.strip()))
+
+    def _split_eid(self, cols: List[str]) -> None:
+        """이벤트 번호를 '이벤트명/의사명' 칸에서 떼어 EID 칸(시트 H열)에 넣는다.
+
+        (2026-09 개편) 독립된 'EID' 열이 사라지고 그 번호가 이벤트명 칸의
+        첫 줄로 들어왔다: ['53608', '별성형외과 코성형'] → '53608 별성형외과 코성형'.
+        그대로 두면 시트 H열(EID)은 영영 비고 E열(이벤트명)은 번호로 오염된다.
+        · 의사상담처럼 번호가 없는 행('홍용택 대표원장')은 건드리지 않는다.
+        · 이벤트명이 숫자로 시작하는 경우('3D 코성형')와 헷갈리지 않도록
+          '4자리 이상 숫자만으로 된 첫 낱말' 일 때만 뗀다.
+        · EID 열이 살아 있는(옛) 화면에서는 이미 값이 있으므로 아무 일도 안 한다."""
+        if cols[self.EID_COL].strip():
+            return
+        head, _, rest = cols[self.EVENT_COL].strip().partition(" ")
+        if rest.strip() and head.isdigit() and len(head) >= 4:
+            cols[self.EID_COL], cols[self.EVENT_COL] = head, rest.strip()
 
     def _check_shapes(self, rows: List[List[str]]) -> None:
         """수집 대상 여부와 무관하게 '모든 데이터 행'을 놓고 칸이 밀렸는지 본다.
@@ -1911,11 +1972,11 @@ class BabitalkChannel(BaseChannel):
         from selenium.webdriver.support.ui import WebDriverWait
 
         WebDriverWait(driver, 20).until(EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "tbody.MuiTableBody-root tr")))
+            (By.CSS_SELECTOR, self.ROW_SEL)))
         time.sleep(1.2)
 
         tdx = self._td_index(driver)            # 시트 칸 → 표 td 번호
-        rows = driver.find_elements(By.CSS_SELECTOR, "tbody.MuiTableBody-root tr")
+        rows = driver.find_elements(By.CSS_SELECTOR, self.ROW_SEL)
         out, all_rows = [], []                  # all_rows: 모양 검사·행 지문용(전체)
         for row in rows:
             tds = row.find_elements(By.TAG_NAME, "td")
@@ -1935,6 +1996,7 @@ class BabitalkChannel(BaseChannel):
                     cols.append(" ".join(lines))
                 else:
                     cols.append("")
+            self._split_eid(cols)
             # 실데이터 아닌 빈 행(고객정보·이벤트명 둘 다 없음) → 스킵
             if not cols[1].strip() and not cols[3].strip():
                 continue
