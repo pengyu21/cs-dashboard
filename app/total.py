@@ -1561,6 +1561,18 @@ class BaseChannel(ABC):
         if self._open_login_page(driver):
             return True                     # 이미 로그인됨(로그인 페이지가 튕겨냄)
 
+        # 계정이 비어 있으면 여기서 끊는다 — 빈 값을 폼에 쳐 봐야 실패하고,
+        # 그 실패는 '아이디/비번 입력이 폼에 반영되지 않았습니다'로 나와서
+        # 화면이 바뀐 것처럼 보인다(실측: 여신티켓 추가 직후 secrets.json 을
+        # 못 받은 PC 에서 이 문구만 보고 사이트 개편을 의심했다).
+        # 어느 PC 의 secrets.json 이 문제인지까지 적어야 바로 고칠 수 있다.
+        if not (self.USER_ID and self.USER_PW):
+            self.login_error = (
+                f"secrets.json 에 '{self.key}' 계정이 없습니다 "
+                f"(이 PC: {socket.gethostname()}) — exe 옆 secrets.json 이 있으면 "
+                f"exe 안의 것보다 그게 먼저 읽힙니다")
+            return False
+
         for r in range(self.LOGIN_RESET_RETRY + 1):
             if r:
                 # 여기 오는 건 '거부당한 근거가 하나도 없는데 화면만 그대로'일 때뿐이다

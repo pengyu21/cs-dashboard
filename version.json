@@ -1,10 +1,10 @@
 {
-  "version": "1.0.27",
-  "notes": "여신티켓 채널 추가 — 상담 신청(신청접수) 수집 + 잔여 상담포인트",
+  "version": "1.0.28",
+  "notes": "계정 누락 진단 — 빈 계정을 '폼 반영 실패'로 오인하던 문구 수정",
   "files": [
     {
       "name": "total.py",
-      "sha256": "d32a052895f8be7d92b8c07f4652e7c2224872aebe9b42919ab56bfa1c8068d2"
+      "sha256": "ec75aba27794519cdd41a4c5ed836d485b69224fa1186b55317f179eba9ba654"
     },
     {
       "name": "runner.py",
