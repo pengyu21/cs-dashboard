@@ -645,6 +645,7 @@ class BrowserHub:
             if h and h in self.driver.window_handles:
                 if self.driver.current_window_handle != h:
                     self.driver.switch_to.window(h)
+                self._unhide_tab()
                 return True
         except Exception:
             pass
@@ -681,11 +682,35 @@ class BrowserHub:
                 return False
             return ch.login(self.driver)    # 제출 전이었으면 한 번만 다시
 
+    def _unhide_tab(self) -> None:
+        """지금 탭이 '화면에 보이는 탭'인 것처럼 동작하게 한다.
+
+        왜 필요한가(실측 — 바비톡 2026-09):
+          러너는 브라우저를 뒤에 띄워두고 채널마다 탭 하나씩을 돌려 쓴다.
+          그래서 대부분의 탭은 document.visibilityState 가 'hidden' 이고,
+          크롬은 숨은 탭의 CSS 애니메이션을 아예 돌리지 않는다.
+          바비톡 로그인 폼은 .form-group 이 opacity:0 에서 시작해
+          opacityUp(0.5s) 으로 떠오르는데, 이게 멈춘 채 남아 아이디·비번·
+          '로그인' 버튼이 전부 opacity:0 → is_displayed() 가 False →
+          버튼을 정상적으로 못 눌러 form.requestSubmit() 폴백으로 빠지고,
+          그건 React 핸들러를 거치지 않아 로그인 요청이 아예 나가지 않는다.
+          그 결과가 '로그인 화면을 넘어가지 못했습니다(클릭 후에도 잔류)' 였다.
+          사람이 창을 앞으로 꺼내 손으로 하면 늘 되던 이유도 이것 — 창이
+          보이는 순간 애니메이션이 끝나 폼이 정상으로 돌아온다.
+        지원하지 않는 크롬/드라이버면 조용히 넘어간다(아래 _settle_animations
+        가 같은 문제를 한 번 더 막는다)."""
+        try:
+            self.driver.execute_cdp_cmd("Emulation.setFocusEmulationEnabled",
+                                        {"enabled": True})
+        except Exception:
+            pass
+
     def _ensure_tab(self, ch: "BaseChannel") -> None:
         """채널 탭으로 전환. 없거나 닫혔으면 빈 창 재활용 또는 새 탭 생성."""
         h = self.tabs.get(ch.key)
         if h and h in self.driver.window_handles:
             self.driver.switch_to.window(h)
+            self._unhide_tab()
             return
         used = set(self.tabs.values())
         free = [w for w in self.driver.window_handles if w not in used]
@@ -694,6 +719,7 @@ class BrowserHub:
         else:
             self.driver.switch_to.new_window("tab")
         self.tabs[ch.key] = self.driver.current_window_handle
+        self._unhide_tab()
 
     def _recreate_tab(self, ch: "BaseChannel") -> None:
         """채널 탭을 닫고 새 탭을 연다 — 새로고침으로 안 풀리는 상태 초기화용.
@@ -716,6 +742,54 @@ class BrowserHub:
         except Exception:
             pass                                # 못 닫아도 아래에서 새 탭을 잡는다
         self._ensure_tab(ch)
+
+    def _clear_site_data(self, ch: "BaseChannel") -> bool:
+        """이 채널 사이트의 세션 흔적(쿠키·localStorage 등)만 지운다.
+
+        새 탭을 열어도 프로필(쿠키·웹스토리지)은 그대로라 '만료된 세션'이
+        그대로 따라온다. 바비톡은 이 상태에서 로그인 화면이 계속 잔류했다
+        (남아 있는 토큰으로 SPA 가 배경 요청을 계속 쏘고, 그때마다 뜨는
+         '로그인 기한이 만료되었습니다' 알림이 클릭을 먹는다).
+        → 사람이 하듯 아예 로그아웃 상태에서 처음부터 로그인하게 만든다.
+
+        ⚠️ 반드시 '도메인 한정' 수단만 쓴다. 브라우저 전체를 비우는
+           Network.clearBrowserCookies 를 쓰면 같은 브라우저를 공유하는
+           다른 채널(강남언니·네이버·카카오…)까지 통째로 로그아웃된다.
+           · CDP Storage.clearDataForOrigin : 넘긴 origin 한 곳만
+           · driver.delete_all_cookies()    : W3C 규격상 '현재 문서 도메인'만"""
+        ok = False
+        for origin in ch.session_origins():
+            try:
+                self.driver.execute_cdp_cmd("Storage.clearDataForOrigin", {
+                    "origin": origin,
+                    "storageTypes": ("cookies,local_storage,session_storage,"
+                                     "indexeddb,websql,cache_storage,"
+                                     "service_workers")})
+                ok = True
+            except Exception as e:
+                print(f"[{ch.name}] 세션 삭제 실패({origin}) — {type(e).__name__}")
+        for step in (lambda: self.driver.delete_all_cookies(),
+                     lambda: self.driver.execute_script(
+                         "try{localStorage.clear()}catch(e){}"
+                         "try{sessionStorage.clear()}catch(e){}")):
+            try:                            # 현재 탭이 그 사이트에 있을 때만 먹는다
+                step()
+            except Exception:
+                pass                        # about:blank·알림창 등 — 위 CDP 로 충분
+        if ok:
+            print(f"[{ch.name}] 사이트 세션 삭제 완료 — 처음 로그인처럼 진행")
+        return ok
+
+    def _fresh_session_login(self, ch: "BaseChannel") -> bool:
+        """마지막 수단 — 세션을 지우고 새 탭에서 '처음 로그인'처럼 한 번만.
+
+        목록 페이지를 먼저 열지 않는 것이 핵심이다. 로그아웃 상태로 목록을
+        열면 XHR 이 401/403 날 때마다 만료 알림이 쏟아지고, 그 알림이 곧이어
+        누를 '로그인' 클릭을 먹어 다시 잔류로 끝난다. 곧장 로그인 페이지로
+        간다(로그인 흐름이 알아서 LOGIN_URL 로 이동한다)."""
+        self._clear_site_data(ch)           # 아직 이 사이트 탭에 있을 때 지운다
+        self._recreate_tab(ch)
+        return self._login_on_fresh_tab(ch)
 
     def _login_on_fresh_tab(self, ch: "BaseChannel") -> bool:
         """새 탭에서 '딱 한 라운드만' 로그인해 본다.
@@ -818,11 +892,18 @@ class BrowserHub:
                     #    이 길로 오지 않는다 → 연속 실패로 계정이 잠기는 일은 없다.
                     if getattr(ch, "login_stuck", False) and not fresh_tab:
                         fresh_tab = True
-                        print(f"[{ch.name}] 로그인 화면 잔류 — 탭을 닫고 "
-                              f"새 탭에서 마지막으로 다시 시도")
-                        self._recreate_tab(ch)
-                        self._open_list(ch)
-                        ok = self._login_on_fresh_tab(ch)
+                        if getattr(ch, "CLEAR_SESSION_ON_STUCK", False):
+                            # 새 탭만으로는 안 풀린다 — 프로필에 남은 만료 세션이
+                            # 그대로 따라오기 때문. 그 사이트 것만 지우고 간다.
+                            print(f"[{ch.name}] 로그인 화면 잔류 — 이 사이트 세션을 "
+                                  f"지우고 새 탭에서 처음 로그인처럼 다시 시도")
+                            ok = self._fresh_session_login(ch)
+                        else:
+                            print(f"[{ch.name}] 로그인 화면 잔류 — 탭을 닫고 "
+                                  f"새 탭에서 마지막으로 다시 시도")
+                            self._recreate_tab(ch)
+                            self._open_list(ch)
+                            ok = self._login_on_fresh_tab(ch)
                         self._focus_tab(ch)
                         if ok:
                             self._open_list(ch)    # 목록 다시 열고 위에서 재확인
@@ -891,6 +972,22 @@ class BaseChannel(ABC):
     #   → Hub 가 탭을 통째로 버리고 새 탭에서 마지막으로 한 번 더 해본다.
     # 거부(비번 오류·캡챠·차단 alert)일 때는 절대 True 가 되지 않는다 → 계정 잠김 방지.
     login_stuck: bool = False
+    # 위 login_stuck 상황에서 '이 사이트 세션을 지우고 처음부터' 로그인할지.
+    # 기본은 끔 — 네이버·카카오처럼 기기/신뢰 쿠키가 사라지면 오히려 추가
+    # 인증(캡챠·2단계)이 걸리는 사이트가 있어서, 채널이 스스로 켜게 둔다.
+    CLEAR_SESSION_ON_STUCK: bool = False
+    # 세션을 지울 때 함께 비울 origin(로그인/목록 주소 외에 API 도메인 등).
+    EXTRA_SESSION_ORIGINS: List[str] = []
+
+    def session_origins(self) -> List[str]:
+        """이 사이트의 세션이 저장되는 origin 목록(중복 제거).
+        여기 적힌 곳'만' 지운다 — 다른 채널 로그인은 절대 건드리지 않는다."""
+        out: List[str] = []
+        for u in (self.LOGIN_URL, self.LIST_URL, *self.EXTRA_SESSION_ORIGINS):
+            m = re.match(r"https?://[^/]+", u or "")
+            if m and m.group(0) not in out:
+                out.append(m.group(0))
+        return out
 
     # ── 팝업 닫기 ─────────────────────────────────────────────
     # ⚠️ 페이지 본문은 절대 클릭하지 않는다. '진짜 오버레이(모달/알림/드로어)'가
@@ -1289,9 +1386,29 @@ class BaseChannel(ABC):
                       f"'비번칸 기준 폴백'으로 찾았습니다 — 셀렉터 갱신 필요")
         return id_in, pw, (blocked or note)
 
+    @staticmethod
+    def _settle_animations(driver) -> int:
+        """진행 중·정지된 진입 애니메이션을 즉시 끝내 '다 그려진' 화면으로 만든다.
+
+        두 가지를 한꺼번에 막는다.
+          1) 숨은 탭이라 애니메이션이 영영 안 돌아 폼이 opacity:0 으로 남는 것
+             (바비톡 자동 로그인이 계속 실패하던 원인 — Hub._unhide_tab 주석 참고)
+          2) 보이는 탭이어도 로드 직후 0.5~3초 동안은 아직 떠오르는 중이라
+             그 사이에 폼을 만지면 똑같이 is_displayed()=False 로 보이는 것
+        finish() 는 애니메이션을 '최종 상태'로 보내므로 화면이 깨지지 않는다
+        (opacity 0 → 1 로 끝난 모습 그대로). 지원 안 하는 브라우저면 0 반환."""
+        try:
+            return int(driver.execute_script(
+                "var a=document.getAnimations?document.getAnimations():[];"
+                "a.forEach(function(x){try{x.finish()}catch(e){}});"
+                "return a.length;") or 0)
+        except Exception:
+            return 0                    # 알림창에 막힘 등 — 호출부가 알아서 재시도
+
     def _fill_login_form(self, driver) -> bool:
         """아이디/비번을 '값이 실제로 들어간 상태'로 만든다. 실패 시 False.
         값 주입 후 value 를 다시 읽어 확인하고, 반영이 안 됐으면 반대 방식으로 폴백한다."""
+        self._settle_animations(driver)     # 떠오르는 중인 폼을 먼저 앉힌다
         # ⚠️ '못 찾음'을 곧이곧대로 믿지 말 것. 만료 alert 이 떠 있어 명령이 막힌
         #    경우도 None 이 된다(폼은 화면에 멀쩡히 있는데도). 알림창을 확인으로
         #    치우고 다시 보는 것을 3라운드 반복한다 — 만료 안내는 XHR 401 마다
@@ -1369,6 +1486,10 @@ class BaseChannel(ABC):
         클릭은 일반 → JS → 비번칸 Enter → form 직접 제출 순으로 폴백한다."""
         from selenium.webdriver.common.keys import Keys
 
+        # 버튼을 찾기 전에 한 번 더 — 입력하는 사이에 새 애니메이션이 걸릴 수 있다.
+        # 여기서 놓치면 버튼이 opacity:0 이라 is_displayed()=False → 정상 클릭 대신
+        # form.requestSubmit() 폴백으로 빠지고, 그건 로그인 요청을 보내지 않는다.
+        self._settle_animations(driver)
         btn = self._login_button(driver)
         for _ in range(10):             # 비활성 버튼은 활성화될 때까지 최대 5초 대기
             if btn is None or btn.is_enabled():
@@ -1814,6 +1935,16 @@ class BabitalkChannel(BaseChannel):
     # SPA 가 화면을 새로 그리느라 전환이 늦다 → 넉넉히 본다(그동안 팝업은 계속 치움).
     LOGIN_WAIT_SEC = 25
     LOGIN_BACKOFF_SEC = 5.5 * 60  # 실패 시 5분 30초 쉬었다 재시도(차단 5분 + 여유)
+    # 세션이 만료된 뒤 자동 로그인이 '클릭 후에도 로그인 화면 잔류'로 계속
+    # 실패했다(사람이 손으로 하면 잘 된다). 새 탭을 열어도 프로필에 남은 만료
+    # 토큰이 따라와 SPA 가 배경 요청을 계속 쏘고, 그때마다 뜨는 만료 알림이
+    # 클릭을 먹는 것이 원인. → 마지막 시도만은 이 사이트 세션을 통째로 지우고
+    # 로그아웃 상태에서 처음 로그인하듯 간다. 제출 횟수는 그대로(한 사이클 2회)라
+    # 사이트의 '5회 연속 실패' 선에는 닿지 않는다.
+    CLEAR_SESSION_ON_STUCK = True
+    # 로그인 토큰은 client-api 도메인에서도 관리된다 → 같이 비운다.
+    EXTRA_SESSION_ORIGINS = ["https://client-api.babitalk.com",
+                             "https://babitalk.com"]
 
     def _logged_in_now(self, driver) -> bool:
         """대기 없는 즉답 판정 — is_logged_in() 과 같은 기준(주소 + 로그인 폼 잔류).

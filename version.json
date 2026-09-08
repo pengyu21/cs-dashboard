@@ -1,10 +1,10 @@
 {
-  "version": "1.0.32",
-  "notes": "바비톡 /ask 표 개편 대응 — MUI 제거로 수집이 매 사이클 시간 초과되던 문제",
+  "version": "1.0.33",
+  "notes": "바비톡 자동 로그인 복구 — 숨은 탭에서 로그인 폼 애니메이션이 멈춰 버튼을 못 누르던 문제",
   "files": [
     {
       "name": "total.py",
-      "sha256": "f4ee47f109c6d5d910ab0a020aebbbcac4242c3e533da71329322dec9c9b69af"
+      "sha256": "3bee12d81e3e6851aa9251f2a234bcccaa2d47209a2ca3c3c6a9b08e3d8808a4"
     },
     {
       "name": "runner.py",
