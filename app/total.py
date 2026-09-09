@@ -2440,22 +2440,30 @@ class GangnamUnniChannel(BaseChannel):
         # .text(보이는 텍스트)가 비면 textContent(숨김 무관)로 폴백. 못 잡으면 이전 값 유지.
         def _txt(el):
             return (el.text or el.get_attribute("textContent") or "").strip()
+        e1_ok = False
         try:
             v = _txt(driver.find_element(
                 By.CSS_SELECTOR,
                 "span.ant-typography-ellipsis-single-line.flex-1.text-left"))
             if v:
                 self.header_cells["E1"] = v
+                e1_ok = True
         except Exception:
             pass
+        # F1('약 6일 후 미노출')은 잔액이 임계 아래로 떨어져야 화면에 뜨는 경고다.
+        # 충전해서 문구가 사라졌는데 이전 값을 그대로 두면 시트·대시보드에 유령
+        # 문구가 계속 걸린다 → '없음'도 값으로 보고 지운다. 다만 페이지 자체를
+        # 못 읽은 사이클(E1도 실패)에 지우면 멀쩡한 값을 날리므로 E1 을 읽었을 때만.
         try:
             v = _txt(driver.find_element(
                 By.XPATH, "//span[contains(@class,'ant-typography') "
                           "and contains(@class,'!text-white')]"))
-            if v:
-                self.header_cells["F1"] = v
         except Exception:
-            pass
+            v = ""
+        if v:
+            self.header_cells["F1"] = v
+        elif e1_ok:
+            self.header_cells["F1"] = ""
 
         # ── Q&A(미답변)도 같은 탭에서 이어서 수집 ────────────────
         # 잔액(E1/F1)은 위에서 이미 읽었으므로 이제 페이지를 옮겨도 안전하다.

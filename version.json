@@ -1,10 +1,10 @@
 {
-  "version": "1.0.33",
-  "notes": "바비톡 자동 로그인 복구 — 숨은 탭에서 로그인 폼 애니메이션이 멈춰 버튼을 못 누르던 문제",
+  "version": "1.0.34",
+  "notes": "강남언니 '약 N일 후 미노출' 문구가 화면에서 사라져도 시트·대시보드에 남던 문제 수정",
   "files": [
     {
       "name": "total.py",
-      "sha256": "3bee12d81e3e6851aa9251f2a234bcccaa2d47209a2ca3c3c6a9b08e3d8808a4"
+      "sha256": "1206ebb4ed2a2a80b37b2fa4b557a61514a7a097e7a36c20bf22c765996ada05"
     },
     {
       "name": "runner.py",
