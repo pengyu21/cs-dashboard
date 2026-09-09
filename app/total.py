@@ -1798,6 +1798,10 @@ class BaseChannel(ABC):
     # 같은 탭 안에 '본 목록과 다른 모양의 블록'을 하나 더 쓸 때 비울 범위들.
     # (예: 강남언니 탭의 Q&A 블록 M3:Q1000 — 본 목록 B3:K1000 과 안 겹친다)
     SHEET_CLEAR_EXTRA: tuple = ()
+    # 사이트 화면에 잔액이 없어 스크랩할 수 없는 채널용 — 사람이 채널 탭의
+    # 이 셀에 잔액을 적어두면 대시보드 '잔액' 열에 그대로 실어준다.
+    # (스크랩으로 잔액을 얻는 채널은 header_cells['E1'] 을 쓰므로 빈 값으로 둔다)
+    BALANCE_CELL: str = ""
 
     def to_sheet_rows(self, items: list) -> list:
         return []
@@ -2875,6 +2879,9 @@ class NaverMapChannel(BaseChannel):
     SHEET_CLEAR = "B3:K1000"
     SHEET_HEADERS = ["No", "신청일시", "고객명", "연락처", "예약일",
                      "시술/상품", "유입경로", "예약번호"]   # A~H
+    # 잔액은 네이버 예약 화면에서 긁을 수 없어 사람이 '네이버지도' 탭 E1 에
+    # 적어둔다. SHEET_CLEAR(B3:K1000)·SHEET_START(B3) 밖이라 수집이 덮지 않는다.
+    BALANCE_CELL = "E1"
     WINDOW_DAYS = 90        # 신청일(REGDATE) 조회 범위: 오늘 기준 과거 N일
 
     def is_logged_in(self, driver) -> bool:
@@ -4950,6 +4957,23 @@ def write_dashboard(results: list) -> None:
     except Exception:
         pass
 
+    # 스크랩으로는 못 얻고 사람이 채널 탭에 적어두는 잔액(네이버지도 E1 등)을
+    # 미리 읽어둔다. 수집 성공/실패와 무관한 값이라 두 경우 모두에 쓴다.
+    # 못 읽으면 조용히 건너뛴다 → 아래에서 시트의 이전 값이 그대로 유지된다.
+    sheet_bal = {}
+    for _ch, _ in results:
+        cell = getattr(_ch, "BALANCE_CELL", "")
+        if not cell:
+            continue
+        try:
+            _cws = _sheet_call(sh.worksheet, _ch.SHEET_TAB)
+            v = (_sheet_call(_cws.acell, cell).value or "").strip()
+            if v:
+                sheet_bal[_ch.key] = v
+        except Exception as e:
+            print(f"[{_ch.name}] 잔액 셀({cell})을 읽지 못했습니다"
+                  f"(이전 값 유지): {classify_error(e).detail}")
+
     summary = [["🔔 상담 통합 대시보드", "", "", _now_stamp()],
                [],
                ["채널", "미확인", "잔액", "비고"]]
@@ -4963,19 +4987,19 @@ def write_dashboard(results: list) -> None:
             continue
         ch, items = pair
         # 수집 실패 → 사유를 그대로 기록(잔액은 이전값 유지, 비고에 예외 원문)
+        bal = sheet_bal.get(ch.key) or ch.header_cells.get("E1", "")
         if isinstance(items, CollectError):
             p = prev.get(ch.name, ["", "", ""])
-            summary.append([ch.name, items.kind, p[1], items.detail])
+            summary.append([ch.name, items.kind, bal or p[1], items.detail])
             failed.append((ch.name, f"{items.kind} · {items.detail}"))
             continue
         if items is None:                       # 사유 미상(구버전 호출 호환)
             p = prev.get(ch.name, ["", "", ""])
-            summary.append([ch.name, "실패", p[1], p[2]])
+            summary.append([ch.name, "실패", bal or p[1], p[2]])
             continue
         cnt = len(items)
         total += cnt
-        summary.append([ch.name, cnt,
-                        ch.header_cells.get("E1", ""),
+        summary.append([ch.name, cnt, bal,
                         ch.header_cells.get("F1", "")])
         for r in ch.dashboard_rows(items):
             detail.append([ch.name] + list(r))
