@@ -524,12 +524,21 @@ class BrowserHub:
         단, '로그인 버튼을 누르지도 못한' 실패(폼이 아직 안 그려짐, 화면 못 읽음 등)는
         사이트에 실패 기록이 남지 않는다 → 계정 잠김과 무관하므로 길게 쉴 이유가 없다.
         이때는 짧게(기본 30초) 쉬고 바로 다시 시도한다.
-        (실측: 폼 못 찾음 하나로 5분 30초씩 세 번을 쉬어 복구에 18분이 걸렸다.)"""
+        (실측: 폼 못 찾음 하나로 5분 30초씩 세 번을 쉬어 복구에 18분이 걸렸다.)
+
+        '제출은 했지만 거부 근거가 하나도 없는' 실패(login_stuck)도 마찬가지다.
+        거부 alert 도 오류 문구도 없었다는 건 아이디/비번을 거절당한 게 아니라는
+        뜻이고 → 사이트의 연속 실패 카운터와 무관하다. 이런 실패는 간헐적이라
+        (바비톡: 몇 번 다시 하면 붙는다) 다시 해보는 것이 곧 복구다. 채널이
+        LOGIN_BACKOFF_STUCK_SEC 를 켜 뒀을 때만 그만큼만 쉰다."""
         long_sec = float(getattr(ch, "LOGIN_BACKOFF_SEC", 0) or self.LOGIN_BACKOFF_SEC)
-        if getattr(ch, "login_attempted", True):
-            return long_sec
-        short = float(getattr(ch, "LOGIN_BACKOFF_SHORT_SEC", 0) or 30)
-        return min(short, long_sec)
+        if not getattr(ch, "login_attempted", True):
+            short = float(getattr(ch, "LOGIN_BACKOFF_SHORT_SEC", 0) or 30)
+            return min(short, long_sec)
+        stuck = float(getattr(ch, "LOGIN_BACKOFF_STUCK_SEC", 0) or 0)
+        if stuck and getattr(ch, "login_stuck", False):
+            return min(stuck, long_sec)
+        return long_sec
 
     def __init__(self, headless: bool = False, persistent: bool = True):
         self.headless = headless
@@ -1105,6 +1114,13 @@ class BaseChannel(ABC):
     # 제출을 '한 번도 못 해본' 실패(폼/버튼 못 찾음 등)는 사이트에 아무 흔적이 없다
     # → 길게 쉴 이유가 없다. 이만큼만 쉬고 바로 다시 시도한다.
     LOGIN_BACKOFF_SHORT_SEC = 30
+    # 제출은 했지만 '거부 근거가 하나도 없는' 실패(login_stuck)의 대기시간.
+    # 0 = 쓰지 않음(= LOGIN_BACKOFF_SEC 그대로). 채널이 켤 때만 짧아진다.
+    # 긴 백오프는 '연속 실패 N회 → 계정 차단'을 피하려는 값인데, 거부 alert 도
+    # 오류 문구도 없었다면 사이트의 실패 카운터는 올라가지 않았다 → 그만큼
+    # 오래 쉴 이유가 없다. 다만 캡챠/기기인증이 걸리는 사이트(네이버·카카오)는
+    # 이 판단이 위험할 수 있어 기본은 끈 채로 둔다.
+    LOGIN_BACKOFF_STUCK_SEC = 0
 
     def _first_visible(self, driver, selectors):
         """CSS selectors 중 화면에 보이는 첫 요소. 없으면 None.
@@ -1964,12 +1980,89 @@ class BabitalkChannel(BaseChannel):
         except Exception:
             return False        # alert 에 막힌 것 — 다음 라운드에서 치우고 다시 본다
 
+    # 로그인 확인 직후 '세션이 저장될 틈'을 준다.
+    #   (실측) 바비톡은 로그인 응답을 받고 화면을 먼저 넘긴 '뒤에' 토큰을 저장한다.
+    #   화면이 넘어간 순간을 성공으로 보고 곧장 /ask 를 하드 로드하면, 저장이
+    #   끝나기 전에 문서가 통째로 갈아엎여 토큰이 사라진다 → 다시 로그인 화면.
+    LOGIN_SETTLE_SEC = 2.5
+    # 로그인 뒤 목록(/ask)이 '정말' 로그인 상태로 열리는지 지켜보는 시간.
+    LIST_VERIFY_SEC = 15
+    # 목록에서 '로그인 상태'가 이만큼 연달아 유지돼야 성공으로 친다.
+    #   /ask 를 열면 로그아웃이어도 잠깐은 로그인 화면이 아니다(SPA 가 /login 으로
+    #   되돌리기 전). 한 번만 보고 판단하면 그 찰나를 성공으로 오판한다.
+    LIST_VERIFY_STABLE = 4          # × LIST_VERIFY_POLL_SEC = 약 2.4초 유지
+    LIST_VERIFY_POLL_SEC = 0.6
+    # '거부 근거 없이 세션만 안 붙은' 실패의 대기시간(초).
+    #   LOGIN_BACKOFF_SEC(5분 30초)은 '아이디/비번 5회 불일치 → 5분 차단'에 맞춘
+    #   값이다. 여기 오는 실패는 거부 alert 이 없었다 = 사이트의 불일치 카운터가
+    #   올라가지 않았다 → 5분 30초를 쉴 이유가 없다. 짧게 쉬고 다음 사이클에 다시
+    #   한다(간헐적으로 성공하는 실패라 재시도 자체가 가장 효과적인 복구다).
+    LOGIN_BACKOFF_STUCK_SEC = 60
+
     def login(self, driver) -> bool:
         """저장된 계정으로 자동 로그인(세션 만료 시 Hub 가 호출).
         채우고 → 한 번 누르고 → alert 으로 결과 확인 → '로그인됐다'가 확인될
-        때까지 이 탭에서 지켜본다. 거부면 그대로 멈추고,
-        Hub 가 LOGIN_BACKOFF_SEC(5분 30초) 뒤에 다시 부른다."""
-        return self._do_login_flow(driver)
+        때까지 이 탭에서 지켜본다 → 마지막으로 목록까지 열어 세션을 확인한다.
+        거부면 그대로 멈추고, Hub 가 LOGIN_BACKOFF_SEC(5분 30초) 뒤에 다시 부른다."""
+        if not self._do_login_flow(driver):
+            return False
+        return self._verify_on_list(driver)
+
+    def _verify_on_list(self, driver) -> bool:
+        """로그인 직후 목록(/ask)까지 열어 '세션이 진짜 붙었는지' 확인한다.
+
+        왜 필요한가(실측 — 바비톡 2026-09):
+          _do_login_flow 의 성공 판정은 '로그인 화면을 벗어났고 비번칸이 없다'
+          하나뿐이다. 그런데 바비톡은 로그인 응답 직후 화면부터 넘기고 토큰은
+          그 뒤에 저장한다 → 넘어간 찰나를 성공으로 보고 곧바로 Hub 가 /ask 를
+          하드 로드하면 토큰이 저장되기 전에 문서가 날아가 로그아웃으로 돌아온다.
+          그 결과가 '로그인 후에도 목록이 미로그인 상태로 나옵니다' 였다.
+
+        이 실패가 특히 나빴던 이유 — Hub.collect() 는 login() 이 True 를 주면
+        '로그인은 됐다'고 믿는다. 그래서 세션을 지우고 새 탭에서 다시 하는
+        복구 경로(login_stuck → _fresh_session_login)로 아예 들어가지 못한 채
+        곧장 5분 30초 백오프를 탔고, 다음 사이클에도 똑같은 레이스가 반복돼
+        스스로는 영영 못 빠져나왔다(사람이 손으로 로그인해 줘야 풀렸다).
+        → 여기서 목록까지 확인해 '아니다'를 잡아내고 login_stuck 을 세워
+          복구 경로로 넘긴다."""
+        time.sleep(self.LOGIN_SETTLE_SEC)       # 토큰이 저장될 틈을 준다
+        for attempt in (1, 2):                  # 이동이 alert 에 막히면 치우고 한 번 더
+            try:
+                driver.get(self.LIST_URL)
+                break
+            except Exception as e:
+                if attempt == 2:
+                    self.login_stuck = True
+                    self.login_error = f"로그인 뒤 목록 이동 실패({type(e).__name__})"
+                    return False
+                self._pop_alert(driver, 1.0)
+        self._pop_alert(driver, self.ALERT_SETTLE_SEC)
+        try:
+            self.dismiss_popups(driver)
+        except Exception:
+            pass
+
+        stable = 0
+        end = time.monotonic() + self.LIST_VERIFY_SEC
+        while True:
+            self._pop_alert(driver)             # 401 마다 새로 뜨는 만료 안내를 치운다
+            stable = stable + 1 if self._logged_in_now(driver) else 0
+            if stable >= self.LIST_VERIFY_STABLE:
+                self.login_error = ""
+                print(f"[{self.name}] 목록까지 로그인 상태 확인 — 수집 진행")
+                return True
+            if time.monotonic() >= end:
+                break
+            time.sleep(self.LIST_VERIFY_POLL_SEC)
+
+        # 로그인 화면은 넘어갔는데 목록은 로그아웃 = 세션이 붙지 않았다.
+        # 거부 alert 이 없었으니 아이디/비번 문제가 아니다 → Hub 가 세션을 지우고
+        # 새 탭에서 한 번 더 하게 한다(login_stuck).
+        self.login_stuck = True
+        self.login_error = ("로그인은 통과했지만 목록이 로그아웃 상태 "
+                            f"— 세션이 저장되지 않았습니다 · {self._page_hint(driver)}")
+        print(f"[{self.name}] {self.login_error}")
+        return False
 
 
     @staticmethod
