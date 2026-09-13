@@ -488,6 +488,87 @@ def _to_sheet_date(s: str):
 
 
 # ══════════════════════════════════════════════════════════════
+# [페이지 로드]  '앗, 이런!'(렌더러 크래시·메모리 부족) 자동 재접속
+# ══════════════════════════════════════════════════════════════
+# 실측(2026-09 네이버지도): 상주 브라우저의 탭 하나가 Out of Memory 로 죽으면
+# 크롬이 그 자리에 오류 화면('앗, 이런! / 오류 코드: Out of Memory')을 그려둔다.
+# driver.get() 은 그 화면을 '정상 로드'로 돌려주기 때문에 수집기는 계속 빈 화면을
+# 긁다가 매 사이클 '시간 초과' 로 끝났고, 사람이 [새로고침] 을 눌러줄 때까지
+# 영영 그 상태로 멈춰 있었다. → 오류 화면을 알아보고 스스로 다시 접속한다.
+
+# 오류 화면에만 있는 표식(정상 사이트의 요소와 겹치지 않는 것만 쓴다)
+_ERROR_PAGE_JS = r"""
+var box = document.querySelector('#main-frame-error, #sad-tab, .neterror');
+if (!box && location.protocol !== 'chrome-error:') return '';
+var code = document.querySelector('.error-code, #error-code');
+var t = (code && code.innerText) || (box && box.innerText) || document.title || '';
+return String(t).replace(/\s+/g, ' ').trim().slice(0, 80) || '페이지 표시 실패';
+"""
+
+# 새로고침으로는 절대 안 풀리는 실패(탭이 없어졌거나 브라우저가 끊김)
+_FATAL_NAV_HINTS = ("no such window", "target window already closed",
+                    "web view not found", "invalid session id",
+                    "session deleted", "not reachable", "disconnected")
+
+
+def page_load_error(driver) -> str:
+    """지금 탭이 크롬 오류/크래시 화면이면 짧은 사유, 정상이면 ""."""
+    from selenium.common.exceptions import UnexpectedAlertPresentException
+    try:
+        return (driver.execute_script(_ERROR_PAGE_JS) or "").strip()
+    except UnexpectedAlertPresentException:
+        return ""                       # 알림창은 오류 화면이 아니다(호출부가 처리)
+    except Exception as e:
+        # 스크립트조차 안 돌아간다 = 렌더러가 죽어 있다(탭 크래시)
+        low = f"{type(e).__name__} {e}".lower()
+        if any(k in low for k in _FATAL_NAV_HINTS):
+            raise
+        return f"탭 응답 없음({type(e).__name__})"
+
+
+def load_page(driver, url: str, tries: int = 3, label: str = "",
+              on_retry=None) -> None:
+    """url 로 이동한다. 크롬이 오류 화면('앗, 이런!' 등)을 띄우거나 로드가
+    시간 초과되면 잠깐 쉬었다 스스로 다시 접속한다(사람이 누르던 [새로고침]).
+
+    on_retry(i) 를 주면 매 재시도 직전에 부른다 — 허브는 여기서 마지막 한 번을
+    '탭을 새로 열어' 시도한다(같은 탭·같은 렌더러로는 안 풀리는 경우 대비).
+    끝내 못 열면 RuntimeError 를 올려 '페이지 오류'로 화면에 표시한다."""
+    from selenium.common.exceptions import UnexpectedAlertPresentException
+
+    tries = max(1, int(tries))
+    who = f"[{label}] " if label else ""
+    why = ""
+    for i in range(1, tries + 1):
+        try:
+            driver.get(url)
+            why = page_load_error(driver)
+        except UnexpectedAlertPresentException:
+            raise                       # 알림창 처리는 호출부(_accept_alert 등) 담당
+        except Exception as e:
+            low = f"{type(e).__name__} {e}".lower()
+            if any(k in low for k in _FATAL_NAV_HINTS):
+                raise                   # 새로고침으로 안 풀린다 → 그대로 올린다
+            why = f"이동 실패({type(e).__name__})"
+            try:                        # 반쯤 걸린 로드는 멈춰둔다(다음 명령 방해)
+                driver.execute_script("window.stop()")
+            except Exception:
+                pass
+        if not why:
+            return
+        print(f"{who}페이지를 표시하지 못했습니다({why}) — 재접속 {i}/{tries}")
+        if i == tries:
+            break
+        time.sleep(min(2.0 * i, 5.0))   # 크래시 직후 바로 치면 또 죽는다
+        if on_retry:
+            try:
+                on_retry(i)
+            except Exception:
+                pass
+    raise RuntimeError(f"페이지를 표시하지 못했습니다 — {why} (재접속 {tries}회 실패)")
+
+
+# ══════════════════════════════════════════════════════════════
 # [브라우저 허브]  단일 브라우저 + 채널별 탭 상주 (세션 유지)
 # ══════════════════════════════════════════════════════════════
 class BrowserHub:
@@ -507,8 +588,19 @@ class BrowserHub:
            그 사이 수동 로그인이 됐으면 백오프를 즉시 풀고 수집(화면 바로 반영)한다.
       8) persistent=True(기본): 원격 디버깅 브라우저를 '최초 1회'만 띄우고
          이후 실행은 그 브라우저에 연결(재사용). 앱을 껐다 켜도 로그인 유지.
+      9) 크롬 오류 화면('앗, 이런!'·렌더러 크래시)이면 스스로 다시 접속하고,
+         마지막 한 번은 탭을 새로 열어서 시도(_goto → load_page)
+     10) 탭 하나를 TAB_RECYCLE_AFTER_SEC 이상 쓰면 수집 전에 새 탭으로 교체
+         (_recycle_tab) — 상주 브라우저는 통째로 재시작하지 못하므로 이게 유일한
+         메모리 정리다. 이걸 안 해서 실제로 탭이 Out of Memory 로 죽었다.
     """
     PAGE_LOAD_TIMEOUT = 45
+    # 크롬 오류 화면('앗, 이런!')·로드 실패 때 한 채널에서 다시 접속해 볼 횟수.
+    # 마지막 한 번은 탭을 새로 열어서 한다(_goto).
+    PAGE_RETRY = 3
+    # 탭 하나를 최대 몇 초까지 쓰고 새 탭으로 갈아끼울지(메모리 정리).
+    # 0 이면 끄기. 상주 브라우저는 며칠씩 떠 있으므로 이게 사실상 유일한 정리다.
+    TAB_RECYCLE_AFTER_SEC = 90 * 60
     RECYCLE_AFTER_SEC = 6 * 3600
     LOGIN_BACKOFF_SEC = 10 * 60         # 로그인 실패 후 재시도 안 하는 시간(10분)
                                         # ※ 채널이 같은 이름의 값을 들고 있으면 그쪽 우선
@@ -546,6 +638,7 @@ class BrowserHub:
         self.attached = False           # 상주 브라우저에 붙었는지(=quit 시 닫지 않음)
         self.driver = None
         self.tabs: Dict[str, str] = {}      # channel_key -> window handle
+        self._tab_born: Dict[str, float] = {}  # channel_key -> 탭을 연 시각(monotonic)
         self.lock = threading.Lock()
         self._started = 0.0
         self._backoff: Dict[str, float] = {}   # channel_key -> 이 시각까지 건너뜀(monotonic)
@@ -572,6 +665,7 @@ class BrowserHub:
         except Exception:
             pass
         self.tabs.clear()
+        self._tab_born.clear()
         self._started = time.monotonic()
         return self
 
@@ -719,6 +813,7 @@ class BrowserHub:
         h = self.tabs.get(ch.key)
         if h and h in self.driver.window_handles:
             self.driver.switch_to.window(h)
+            self._tab_born.setdefault(ch.key, time.monotonic())
             self._unhide_tab()
             return
         used = set(self.tabs.values())
@@ -728,6 +823,7 @@ class BrowserHub:
         else:
             self.driver.switch_to.new_window("tab")
         self.tabs[ch.key] = self.driver.current_window_handle
+        self._tab_born[ch.key] = time.monotonic()  # 탭 나이 초기화(메모리 정리 기준)
         self._unhide_tab()
 
     def _recreate_tab(self, ch: "BaseChannel") -> None:
@@ -738,6 +834,7 @@ class BrowserHub:
         없음) 렌더러가 멈춘 경우엔 몇 번을 새로고침해도 같은 화면만 나온다.
         탭을 통째로 버리면 그 컨텍스트가 사라져 깨끗한 상태에서 다시 시작한다."""
         h = self.tabs.pop(ch.key, None)
+        self._tab_born.pop(ch.key, None)
         try:
             if h and h in self.driver.window_handles:
                 # 마지막 남은 탭을 닫으면 브라우저가 통째로 죽는다 → 새 탭 먼저
@@ -813,9 +910,45 @@ class BrowserHub:
         finally:
             ch.LOGIN_RESET_RETRY = old
 
+    def _recycle_tab(self, ch: "BaseChannel") -> None:
+        """오래 쓴 탭은 수집 '전에' 미리 새 탭으로 갈아끼운다 — 메모리 정리.
+
+        왜 필요한가(실측 2026-09 네이버지도):
+          상주 브라우저는 며칠씩 떠 있고, 탭 7~8개가 2분마다 무거운 SPA 를 다시
+          그린다. 크롬은 탭을 닫기 전까지 그 렌더러가 쥔 메모리를 돌려주지 않아
+          결국 한 탭이 Out of Memory 로 죽었다('앗, 이런!' → 매 사이클 시간 초과).
+          maybe_recycle() 은 상주 브라우저(attached)를 건너뛴다 — 우리 것이 아니라
+          통째로 재시작하면 사람이 띄워둔 창까지 닫히기 때문. 그래서 브라우저는
+          그대로 두고 '탭만' 조용히 바꾼다.
+        로그인은 프로필 쿠키에 있으므로 새 탭에서도 그대로 유지된다. 어차피 매
+        사이클 LIST_URL 을 새로 여니 사용자 눈에 보이는 차이도 없다."""
+        ttl = float(getattr(self, "TAB_RECYCLE_AFTER_SEC", 0) or 0)
+        if ttl <= 0:
+            return
+        born = self._tab_born.get(ch.key, 0.0)
+        age = time.monotonic() - born if born else 0.0
+        if not born or age < ttl:
+            return
+        print(f"[{ch.name}] 탭을 {int(age // 60)}분 사용 → 새 탭으로 교체(메모리 정리)")
+        self._recreate_tab(ch)
+
+    def _goto(self, ch: "BaseChannel", url: str) -> None:
+        """채널 탭에서 url 로 이동 — 크롬 오류 화면이면 스스로 다시 접속한다.
+
+        마지막 한 번은 탭을 새로 열어서 시도한다. 렌더러가 메모리 부족으로
+        죽은 탭은 같은 탭에서 아무리 새로고침해도 또 죽는 일이 잦다(크래시한
+        렌더러가 잡고 있던 메모리는 탭을 버려야 온전히 풀린다)."""
+        def _before_retry(i: int) -> None:
+            if i >= self.PAGE_RETRY - 1:           # 마지막 시도 = 새 탭에서
+                print(f"[{ch.name}] 탭을 새로 열고 마지막으로 다시 접속")
+                self._recreate_tab(ch)
+
+        load_page(self.driver, url, tries=self.PAGE_RETRY,
+                  label=ch.name, on_retry=_before_retry)
+
     def _open_list(self, ch: "BaseChannel") -> None:
         """목록 페이지를 완전 재로드하고, 늦게 뜨는 알림창/팝업까지 치운다."""
-        self.driver.get(ch.LIST_URL)               # 새로고침 대신 완전 재로드
+        self._goto(ch, ch.LIST_URL)                # 새로고침 대신 완전 재로드
         # 미로그인/세션만료 등 늦게 뜨는 alert까지 대기해서 닫음.
         # 채널이 더 긴 창을 요구하면(ALERT_SETTLE_SEC) 그만큼 기다린다.
         self._accept_alert(max(2.0, getattr(ch, "ALERT_SETTLE_SEC", 0.0)))
@@ -858,6 +991,7 @@ class BrowserHub:
                 self.tabs.pop(ch.key, None)
                 self._ensure_tab(ch)
 
+            self._recycle_tab(ch)                  # 오래된 탭이면 먼저 갈아끼운다
             self._open_list(ch)
             tries = 0                              # 실제로 login() 을 부른 횟수
             fresh_tab = False                      # '탭 새로 열고 재시도'를 이미 썼는지
@@ -922,7 +1056,21 @@ class BrowserHub:
                       f"({ch.login_error}) — 새로고침하고 곧장 다시 시도")
                 self._open_list(ch)
             self._backoff.pop(ch.key, None)        # 로그인 정상(수동 포함) → 백오프 해제
-            return ch.scrape(self.driver)
+            try:
+                return ch.scrape(self.driver)
+            except Exception as e:
+                # 스크랩 '도중' 탭이 죽으면(메모리 부족 등) 기다리던 요소가 영영
+                # 안 나타나 '시간 초과'로만 보인다 — 실제 사유를 붙여 올린다.
+                # (다음 사이클의 _open_list 가 새 탭으로 다시 접속해 복구한다)
+                try:
+                    why = page_load_error(self.driver)
+                except Exception:
+                    why = ""
+                if why:
+                    raise RuntimeError(
+                        f"페이지를 표시하지 못했습니다 — {why}"
+                        f" (수집 중 탭이 죽었습니다 · 다음 사이클에 재접속)") from e
+                raise
 
     def maybe_recycle(self) -> None:
         # 상주 브라우저(attached)는 우리가 소유하지 않으니 재시작하지 않음.
@@ -938,6 +1086,7 @@ class BrowserHub:
         if self.attached:
             self.driver = None
             self.tabs.clear()
+            self._tab_born.clear()
             return
         try:
             if self.driver:
@@ -946,6 +1095,7 @@ class BrowserHub:
             pass
         self.driver = None
         self.tabs.clear()
+        self._tab_born.clear()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1350,7 +1500,7 @@ class BaseChannel(ABC):
 
     def _goto_login_page(self, driver) -> None:
         """로그인 화면으로 이동. 홈에서 '로그인'을 눌러야 하는 채널은 override."""
-        driver.get(self.LOGIN_URL)
+        load_page(driver, self.LOGIN_URL, label=self.name)
 
     def _prepare_submit(self, driver) -> None:
         """제출 직전 채널별 추가 처리(자동로그인/로그인상태유지 체크 등)."""
@@ -2028,7 +2178,7 @@ class BabitalkChannel(BaseChannel):
         time.sleep(self.LOGIN_SETTLE_SEC)       # 토큰이 저장될 틈을 준다
         for attempt in (1, 2):                  # 이동이 alert 에 막히면 치우고 한 번 더
             try:
-                driver.get(self.LIST_URL)
+                load_page(driver, self.LIST_URL, tries=2, label=self.name)
                 break
             except Exception as e:
                 if attempt == 2:
@@ -2650,7 +2800,7 @@ class GangnamUnniChannel(BaseChannel):
         from selenium.webdriver.support import expected_conditions as EC
         from selenium.webdriver.support.ui import WebDriverWait
 
-        driver.get(self.CHAT_URL)
+        load_page(driver, self.CHAT_URL, label=self.name)
         self.dismiss_popups(driver)
         WebDriverWait(driver, 20).until(EC.presence_of_element_located(
             (By.XPATH, f"//*[contains(text(),'{self.CHAT_FILTER}')]")))
@@ -2839,7 +2989,7 @@ class GangnamUnniChannel(BaseChannel):
         from selenium.webdriver.support import expected_conditions as EC
         from selenium.webdriver.support.ui import WebDriverWait
 
-        driver.get(self.QNA_URL)
+        load_page(driver, self.QNA_URL, label=self.name)
         self.dismiss_popups(driver)
         # 빈 목록이면 tr.ant-table-placeholder 가 뜬다 → tr 로 기다려야 20초를 안 버린다
         WebDriverWait(driver, 20).until(EC.presence_of_element_located(
@@ -3028,12 +3178,13 @@ class NaverMapChannel(BaseChannel):
         from selenium.webdriver.support import expected_conditions as EC
         from selenium.webdriver.support.ui import WebDriverWait
 
-        driver.get(self.LOGIN_URL)
+        load_page(driver, self.LOGIN_URL, label=self.name)
         try:
             WebDriverWait(driver, 20).until(EC.element_to_be_clickable(
                 (By.XPATH, "//a[normalize-space()='로그인']"))).click()
         except Exception:
-            driver.get("https://nid.naver.com/nidlogin.login")
+            load_page(driver, "https://nid.naver.com/nidlogin.login",
+                      label=self.name)
 
     def _fill_login_form(self, driver) -> bool:
         """네이버는 값 주입·빠른 타이핑이 봇으로 걸리므로 클립보드 붙여넣기를 쓴다."""
@@ -3455,7 +3606,7 @@ class YeosinTicketChannel(BaseChannel):
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
 
-        driver.get(self.BALANCE_URL)
+        load_page(driver, self.BALANCE_URL, label=self.name)
         self.dismiss_popups(driver)
 
         def _bal(d):
@@ -3957,7 +4108,8 @@ class KakaoTalkChannel(BaseChannel):
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
 
-        driver.get(self.LOGIN_URL)              # → accounts.kakao.com/login 리디렉션
+        # → accounts.kakao.com/login 리디렉션
+        load_page(driver, self.LOGIN_URL, label=self.name)
         try:            # 로그인 폼이든 계정 선택 목록이든 '로그인 화면'이 뜰 때까지 대기.
                         # 리디렉션이 늦어 URL 이 아직 center-pf 인 순간에 '로그인됨'으로
                         # 단정하면 계정을 누르지도 않고 성공 처리돼 버린다.
@@ -4425,6 +4577,11 @@ _ERROR_RULES = [
       "체크박스를 켜지 못"), "화면 바뀜"),
     (("백오프",), "로그인 대기"),
     (("자동 로그인", "로그인 실패", "login"), "로그인 실패"),
+    # 크롬 오류 화면('앗, 이런!'·렌더러 크래시·메모리 부족) → 자동 재접속까지
+    # 했는데도 못 연 경우. '시간 초과'로 뭉뚱그리면 사이트가 느린 건지 탭이
+    # 죽은 건지 화면만 보고는 구분이 안 된다.
+    (("페이지를 표시하지 못", "탭 응답 없음", "tab crashed",
+      "chrome-error", "out of memory"), "페이지 오류"),
     (("timeout", "timed out", "시간초과"), "시간 초과"),
     (("no such window", "target window already closed",
       "web view not found"), "탭 닫힘"),
