@@ -2500,7 +2500,15 @@ class GangnamUnniChannel(BaseChannel):
     #   신규가 계속 0건이 됐다(바비톡 열 밀림과 같은 조용한 오작동).
     # 사람이 쓴 메모는 항상 이 자동 줄들 사이/위에 섞여 들어오므로,
     # 자동 줄만 걷어내고 남은 게 있으면 '처리됨' 으로 본다.
-    _RE_MEMO_AUTO = re.compile(r"^(희망일\s*\d*\s*[:：]|메모하기$)")
+    # ⚠️ 콜론을 '있어도 되고 없어도 되게' 둔다 — 콜론이 필수였을 때는 사이트가
+    #    '희망일1 2026/09/07 09:00' 처럼 콜론 없이 찍기만 해도 이 줄이 사람 메모로
+    #    인정돼, 아무도 손대지 않은 신규 행이 통째로 '처리됨' 으로 빠졌다.
+    #    '희망일 변경 요청' 같은 사람 메모까지 같이 걷힐 수 있지만, 그때는 행이
+    #    미확인에 남는(=눈에 보이는) 방향으로 틀리므로 이쪽이 안전하다.
+    # '옵션가:' 는 원래 MEMO_AUTO_TAIL 아래에 있어 안 걸러도 됐지만, 꼬리 판정이
+    # 깨졌을 때를 대비한 2차 방어로 같이 둔다.
+    _RE_MEMO_AUTO = re.compile(
+        r"^(희망일\s*\d*\s*[:：]?|옵션가\s*[:：]?|메모하기$)")
     MEMO_AUTO_TAIL = "[선택한 옵션]"     # 이 줄부터 끝까지는 이벤트명·옵션가(자동)
     # ⚠️ '… (2026.09.22 23:34 - 시스템 기록)' 형태의 자동 기록은 예전엔 여기서
     #    같이 걷어냈다. 그런데 '[예약취소] 일정에 맞출 수 없어요 (… - 시스템 기록)'
@@ -2601,7 +2609,10 @@ class GangnamUnniChannel(BaseChannel):
         남은 게 있으면 → 신규(미확인)에서 제외한다."""
         out = []
         for line in _cell_lines(td):
-            if line.strip() == self.MEMO_AUTO_TAIL:
+            # ⚠️ 완전일치가 아니라 startswith — '[선택한 옵션] 루나코주사 이벤트'
+            #    처럼 꼬리표와 이벤트명이 한 줄로 붙어 오면 완전일치는 못 끊고,
+            #    이벤트명이 사람 메모로 인정돼 신규 행이 빠진다.
+            if line.strip().startswith(self.MEMO_AUTO_TAIL):
                 break                            # 이 아래는 전부 자동 블록
             if self._RE_MEMO_AUTO.match(line):
                 continue
@@ -2667,7 +2678,18 @@ class GangnamUnniChannel(BaseChannel):
             memo = self._human_memo(tds[8])
             if memo:                             # 사람이 쓴 메모가 있으면 → 제외
                 continue
-            status = (_cell_lines(tds[4]) or [""])[0]     # 상태 = td#4 첫 줄
+            # 상태 칸은 '전화/채팅완료 ▶ 내원완료 ▶ 시술예약취소' 처럼 지나온
+            # 단계가 누적돼 보인다.
+            #   · 판정(SKIP_STATUS)은 지금까지와 똑같이 '첫 줄 완전일치' 로 둔다.
+            #     취소 라벨을 칸 전체 부분일치로 걸러보려 했지만, NOISE 목록에
+            #     '내원예약취소' 가 이미 '버튼 라벨' 로 등록돼 있다 — 이 문자열이
+            #     상태 칸에서도 버튼으로 뜨면 살아있는 행이 전부 빠진다(조용한 0건).
+            #     상태 칸 원문을 확인하기 전에는 판정에 쓰지 않는다.
+            #   · 대신 시트 F열에는 칸 전체를 적어 둔다. 실제 신규 상담이 들어왔을
+            #     때 F열만 보면 각 단계가 어떤 문자열로 오는지 알 수 있고, 그때
+            #     근거를 갖고 판정 기준을 정하면 된다. 판정에는 영향이 없다.
+            status_lines = _cell_lines(tds[4])
+            status = (status_lines or [""])[0]            # 판정용(기존과 동일)
             if status.replace(" ", "") in self.SKIP_STATUS:   # 내원안함 등 → 제외
                 continue
 
@@ -2690,7 +2712,9 @@ class GangnamUnniChannel(BaseChannel):
 
             out.append({"kind": "consult",
                         "applied": applied, "customer": customer,
-                        "contact": contact, "route": route, "status": status,
+                        "contact": contact, "route": route,
+                        # 시트 F열: 단계 전체(판정에는 status 첫 줄만 쓴다)
+                        "status": " / ".join(status_lines),
                         "sisul": sisul, "doctor": doctor, "memo": memo, "sms": sms,
                         "row_key": row.get_attribute("data-row-key")})
 
