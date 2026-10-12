@@ -2592,7 +2592,7 @@ class GangnamUnniChannel(BaseChannel):
         except Exception:
             pass
 
-    def _human_memo(self, td) -> str:
+    def _human_memo(self, driver, td) -> str:
         """메모칸(td#8)에서 '모든 행에 늘 붙는 자동입력'만 걷어내고 남은 내용을 돌려준다.
 
         걷어내는 것(신규 행에도 항상 들어있어 판정에 쓸 수 없는 값):
@@ -2608,7 +2608,7 @@ class GangnamUnniChannel(BaseChannel):
 
         남은 게 있으면 → 신규(미확인)에서 제외한다."""
         out = []
-        for line in _cell_lines(td):
+        for line in _cell_lines_dom(driver, td):
             # ⚠️ 완전일치가 아니라 startswith — '[선택한 옵션] 루나코주사 이벤트'
             #    처럼 꼬리표와 이벤트명이 한 줄로 붙어 오면 완전일치는 못 끊고,
             #    이벤트명이 사람 메모로 인정돼 신규 행이 빠진다.
@@ -2675,7 +2675,12 @@ class GangnamUnniChannel(BaseChannel):
             # 신규 = 메모칸에 '사람이 쓴 메모'가 아직 없는 상태.
             #   시스템 자동입력(희망일·선택한 옵션·예약취소 기록)은 빼고 본다.
             #   → _human_memo 주석 참고. 안 그러면 전 행이 '처리됨' 이 된다.
-            memo = self._human_memo(tds[8])
+            # ⚠️ 셀 글자는 반드시 _cell_lines_dom 으로 읽는다(2026-10 실측).
+            #    셀레니움 .text 는 '화면에 보이는 글자'만 돌려줘서, 표가 창 아래로
+            #    잘린 행(위 2행 빼고 전부)은 모든 칸이 '' 로 읽혔다. 그러면 메모칸도
+            #    빈 것으로 보여 이미 메모가 있는 행까지 이름·내용 없는 빈 행으로
+            #    미확인에 올라갔다.
+            memo = self._human_memo(driver, tds[8])
             if memo:                             # 사람이 쓴 메모가 있으면 → 제외
                 continue
             # 상태 칸은 '전화/채팅완료 ▶ 내원완료 ▶ 시술예약취소' 처럼 지나온
@@ -2688,27 +2693,28 @@ class GangnamUnniChannel(BaseChannel):
             #   · 대신 시트 F열에는 칸 전체를 적어 둔다. 실제 신규 상담이 들어왔을
             #     때 F열만 보면 각 단계가 어떤 문자열로 오는지 알 수 있고, 그때
             #     근거를 갖고 판정 기준을 정하면 된다. 판정에는 영향이 없다.
-            status_lines = _cell_lines(tds[4])
+            status_lines = _cell_lines_dom(driver, tds[4])
             status = (status_lines or [""])[0]            # 판정용(기존과 동일)
             if status.replace(" ", "") in self.SKIP_STATUS:   # 내원안함 등 → 제외
                 continue
 
-            applied = " ".join(_cell_lines(tds[0]))
+            applied = " ".join(_cell_lines_dom(driver, tds[0]))
             try:
-                name = row.find_element(
-                    By.CSS_SELECTOR,
-                    "[data-testid='consultation-txt-name']").text.strip()
+                name = " ".join(_cell_lines_dom(driver, row.find_element(
+                    By.CSS_SELECTOR, "[data-testid='consultation-txt-name']")))
             except Exception:
                 name = ""
-            info = _cell_lines(tds[1])
+            info = _cell_lines_dom(driver, tds[1])
             birth = info[-1] if info else ""              # 예: '여 / 2007'
             customer = f"{name} ({birth})" if name else birth
-            contact = (_cell_lines(tds[2]) or [""])[0]
-            route = " / ".join(l for l in _cell_lines(tds[3]) if l not in self.NOISE)
-            sisul = " ".join(l for l in _cell_lines(tds[6]) if l not in self.NOISE) \
+            contact = (_cell_lines_dom(driver, tds[2]) or [""])[0]
+            route = " / ".join(l for l in _cell_lines_dom(driver, tds[3])
+                               if l not in self.NOISE)
+            sisul = " ".join(l for l in _cell_lines_dom(driver, tds[6])
+                             if l not in self.NOISE) \
                 if len(tds) > 6 else ""
-            doctor = " ".join(_cell_lines(tds[7])) if len(tds) > 7 else ""
-            sms = " ".join(_cell_lines(tds[9])) if len(tds) > 9 else ""
+            doctor = " ".join(_cell_lines_dom(driver, tds[7])) if len(tds) > 7 else ""
+            sms = " ".join(_cell_lines_dom(driver, tds[9])) if len(tds) > 9 else ""
 
             out.append({"kind": "consult",
                         "applied": applied, "customer": customer,
@@ -3048,7 +3054,7 @@ class GangnamUnniChannel(BaseChannel):
 
         def lines(tds, key):
             el = cell(tds, key)
-            return _cell_lines(el) if el is not None else []
+            return _cell_lines_dom(driver, el) if el is not None else []
 
         out = []
         for row in driver.find_elements(
@@ -3058,7 +3064,7 @@ class GangnamUnniChannel(BaseChannel):
                 continue
             st_el = cell(tds, "답변상태") or tds[-1]
             # '답변완료' 에는 '미답변' 이 안 들어가므로 부분일치로 판별해도 안전
-            if self.QNA_UNANSWERED not in " ".join(_cell_lines(st_el)):
+            if self.QNA_UNANSWERED not in " ".join(_cell_lines_dom(driver, st_el)):
                 continue
             # 내용 칸에는 질문 + '답변달기' 버튼(미답변) 이 같이 들어온다
             question = " ".join(l for l in lines(tds, "내용")

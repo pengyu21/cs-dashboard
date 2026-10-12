@@ -1,10 +1,10 @@
 {
-  "version": "1.0.39",
-  "notes": "강남언니 메모칸 자동입력 판정 보강(콜론 없어도·'[선택한 옵션]'이 한 줄로 붙어도 걸러냄) + 상태 칸 단계 전체를 시트 F열에 기록",
+  "version": "1.0.40",
+  "notes": "강남언니 화면 밖 행이 빈칸 미확인으로 잡히던 문제 수정(셀을 DOM 기준으로 읽음, Q&A 포함)",
   "files": [
     {
       "name": "total.py",
-      "sha256": "ffde9e778ed9b9f26ea8cbb6bfaeae09060bdb7e3fa86ac6ba7ad1b6e8249f38"
+      "sha256": "7da2019ce44fe4a5352af856c873c148bff23120c936c32afa08feaf4051f0a5"
     },
     {
       "name": "runner.py",
