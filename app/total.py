@@ -2528,6 +2528,9 @@ class GangnamUnniChannel(BaseChannel):
     _RE_CHAT_WHEN = re.compile(
         r"(오늘|어제|그제|그저께|오전|오후)|\d{1,2}:\d{2}"
         r"|\d{2,4}[.\-/]\s?\d{1,2}[.\-/]\s?\d{1,2}")
+    # 채팅 카드 미리보기의 보낸 사람 — '나 : …' = 병원(우리)이 마지막에 보냄.
+    # 고객이 보낸 건 '고객 : …' 으로 찍힌다.
+    _RE_CHAT_MINE = re.compile(r"^\s*나\s*[:：]")
 
     def is_logged_in(self, driver) -> bool:
         """현재 탭 기준 판별(네비게이션은 Hub가 이미 함). SPA 정착까지 대기."""
@@ -2804,7 +2807,43 @@ class GangnamUnniChannel(BaseChannel):
                 box, wrap = b, w
                 break
 
-        if box is not None and box.is_selected():
+        # 커스텀 체크박스(input 없음 / input 은 숨고 겉모양만 바뀜)도 있으므로
+        # input.checked 하나만 믿지 않고 aria-checked · 'checked' 클래스까지 본다.
+        # ⚠️ (2026-10 실측) 예전엔 input 을 못 찾으면 상태 확인 없이 글자를
+        #    눌렀다 → 이미 켜져 있던 필터가 '꺼지고' 전체 대화가 미확인으로
+        #    쏟아졌다(우리가 마지막에 답한 '나 : …' 대화 10건).
+        def is_on() -> Optional[bool]:
+            try:
+                return driver.execute_script("""
+                  const KEY = arguments[0], box = arguments[1];
+                  const on = e => !!e && (
+                    e.checked === true ||
+                    e.getAttribute('aria-checked') === 'true' ||
+                    /(^|[\\s_-])(is-)?checked(\\b|_)/i.test(e.className || '') ||
+                    e.getAttribute('data-state') === 'checked');
+                  if (box) {
+                    if (box.checked) return true;
+                    for (let n = box, i = 0; n && i < 4; n = n.parentElement, i++)
+                      if (on(n)) return true;
+                    return false;
+                  }
+                  // input 이 없으면 글자 주변(위 4단계 · 형제)에서 체크 표시를 찾는다
+                  const lab = [...document.querySelectorAll('*')].find(e =>
+                    [...e.childNodes].some(c => c.nodeType === 3 &&
+                      c.textContent.replace(/\\s/g, '').includes(KEY)));
+                  if (!lab) return null;
+                  for (let n = lab, i = 0; n && i < 4; n = n.parentElement, i++) {
+                    if (on(n)) return true;
+                    for (const c of n.querySelectorAll(
+                        '[role=checkbox],[aria-checked],[class*=heck]'))
+                      if (on(c)) return true;
+                  }
+                  return false;
+                """, self.CHAT_FILTER, box)
+            except Exception:
+                return None
+
+        if is_on():
             return True
 
         # 누를 대상: 라벨(있으면) → 감싼 요소 → 체크박스 자체(JS)
@@ -2831,8 +2870,16 @@ class GangnamUnniChannel(BaseChannel):
                 except Exception:
                     continue
                 time.sleep(1.0)
-                if box is None or box.is_selected():
+                state = is_on()
+                if state:
                     return True
+                if state is None:
+                    # 상태를 읽을 수 없는 UI → 켜졌다고 가정하되, 잘못 껐을 때를
+                    # 대비해 scrape_chats 가 '나 :' 대화를 한 번 더 걸러낸다.
+                    return True
+                # 확실히 꺼져 있음 → 다음 후보로(한 번 더 누르면 다시 꺼질 수 있어
+                # 같은 대상을 두 방식으로 연달아 누르지 않는다)
+                break
         return False
 
     def scrape_chats(self, driver) -> List[dict]:
@@ -2876,12 +2923,19 @@ class GangnamUnniChannel(BaseChannel):
           return out;
         """) or []
 
-        out = []
+        out, replied = [], 0
         for text in cards:
             it = self._parse_chat_card(text)
-            if it:
-                out.append(it)
-        print(f"[{self.name}] 채팅상담 미응대 {len(out)}건")
+            if not it:
+                continue
+            # 2차 방어: 마지막 메시지가 우리 쪽('나 : …')이면 이미 답한 대화다.
+            # 필터가 풀리거나 목록 재조회가 늦어도 이런 대화는 미확인에 안 올린다.
+            if self._RE_CHAT_MINE.match(it["message"]):
+                replied += 1
+                continue
+            out.append(it)
+        print(f"[{self.name}] 채팅상담 미응대 {len(out)}건"
+              + (f" (답변한 대화 {replied}건 제외)" if replied else ""))
         return out
 
     def _parse_chat_card(self, text: str) -> Optional[dict]:

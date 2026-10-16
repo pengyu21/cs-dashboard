@@ -1,10 +1,10 @@
 {
-  "version": "1.0.40",
-  "notes": "강남언니 화면 밖 행이 빈칸 미확인으로 잡히던 문제 수정(셀을 DOM 기준으로 읽음, Q&A 포함)",
+  "version": "1.0.41",
+  "notes": "강남언니 채팅: 답변한 대화(나 :) 제외 + 필터 오작동 수정",
   "files": [
     {
       "name": "total.py",
-      "sha256": "7da2019ce44fe4a5352af856c873c148bff23120c936c32afa08feaf4051f0a5"
+      "sha256": "6724a3bc9b413ebc7ebeaf68dd5ed1d505c4be1474f1d2fc51d14840717a00fe"
     },
     {
       "name": "runner.py",
