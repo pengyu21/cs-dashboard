@@ -1,10 +1,10 @@
 {
-  "version": "1.0.42",
-  "notes": "카카오톡: 카카오 예약(확정대기) 수집 추가 — 이름·상품명·신청일시·연락처",
+  "version": "1.0.43",
+  "notes": "카카오 예약: 파트너 지정 redirect 주소로 열기(/booking 튕김 수정)",
   "files": [
     {
       "name": "total.py",
-      "sha256": "75034e58711ef94de0159dcb8da5ae3eefdd0c6390af3b2642f50093f229f597"
+      "sha256": "dea0dae4e3ec4939455ab758e0472ec3d47fd67f9a83b071b903ac40690d860e"
     },
     {
       "name": "runner.py",

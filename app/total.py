@@ -3995,7 +3995,10 @@ class KakaoTalkChannel(BaseChannel):
     # 예약상태 '예약신청' = 확정대기 = CS 가 아직 확정/거절하지 않은 건.
     # 예약신청일시는 상세 팝업을 열 필요 없이 목록 표의 오른쪽 열에 이미 있다
     # (가로 스크롤로 가려져 있을 뿐) → 표 머리글 이름으로 열을 찾아 읽는다.
-    BOOKING_URL = "https://business.kakao.com/booking/reservation"
+    # ⚠️ /booking/reservation 을 바로 열면 파트너가 안 정해져 /booking 첫 화면으로
+    #    튕긴다 → 사이트 왼쪽 메뉴와 같은 redirect 주소로 파트너(319756)를 지정해 연다.
+    BOOKING_URL = ("https://business.kakao.com/booking/redirect"
+                   "?partnerId=319756&redirectUri=%2Freservation")
     BOOKING_STATUS = "예약신청"
     # 대시보드 '내용' 앞 표식 — Index.html SUBKINDS 가 이걸로 '카카오 예약' 꼬리표를 단다.
     BOOKING_MARK = "[예약] "
@@ -4437,8 +4440,11 @@ return {heads: heads, rows: rows, pend: pend};
         load_page(driver, self.BOOKING_URL, label=self.name)
         if self._at_login(driver):
             raise RuntimeError("카카오 예약 페이지가 로그인 화면으로 넘어갔습니다")
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located(
-            (By.CSS_SELECTOR, ".list_status .txt_status, .table_reserve table")))
+        try:            # redirect → /reservation 으로 넘어가 표가 뜰 때까지
+            WebDriverWait(driver, 20).until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, ".list_status .txt_status, .table_reserve table")))
+        except Exception:
+            raise RuntimeError(f"예약 목록이 안 열렸습니다(현재 주소: {driver.current_url})")
         # 표·숫자는 비동기로 채워진다 → 확정대기 숫자만큼 행이 뜰 때까지 잠깐 기다림
         items, pend = [], None
         end = time.monotonic() + 10
