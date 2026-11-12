@@ -1,10 +1,10 @@
 {
-  "version": "1.0.41",
-  "notes": "강남언니 채팅: 답변한 대화(나 :) 제외 + 필터 오작동 수정",
+  "version": "1.0.42",
+  "notes": "카카오톡: 카카오 예약(확정대기) 수집 추가 — 이름·상품명·신청일시·연락처",
   "files": [
     {
       "name": "total.py",
-      "sha256": "6724a3bc9b413ebc7ebeaf68dd5ed1d505c4be1474f1d2fc51d14840717a00fe"
+      "sha256": "75034e58711ef94de0159dcb8da5ae3eefdd0c6390af3b2642f50093f229f597"
     },
     {
       "name": "runner.py",

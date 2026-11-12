@@ -456,7 +456,8 @@ def _to_sheet_date(s: str):
     # ⚠️ 2자리 연도('26-09-07 21:28')도 받는다 — 2026-09 바비톡 개편으로
     #    '신청일' 칸이 4자리에서 2자리 연도로 바뀌었다. %Y 를 먼저 시도하므로
     #    4자리와 섞여도 오해석되지 않는다('2026-…' 은 %y 로는 파싱되지 않는다).
-    for fmt in ("%Y.%m.%d %H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
+    for fmt in ("%Y.%m.%d %H:%M", "%Y.%m.%d %H:%M:%S",    # 카카오 예약 '2026.11.12 16:08:53'
+                "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
                 "%y.%m.%d %H:%M", "%y-%m-%d %H:%M", "%y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d %H:%M")
@@ -3989,6 +3990,22 @@ class KakaoTalkChannel(BaseChannel):
     SHEET_START = "B3"
     SHEET_CLEAR = "B3:F1000"
 
+    # ── 카카오 예약(예약하기 파트너센터) ──────────────────────────
+    # 채팅 목록 다음 단계로 매 사이클 확인한다(강남언니 Q&A 와 같은 방식).
+    # 예약상태 '예약신청' = 확정대기 = CS 가 아직 확정/거절하지 않은 건.
+    # 예약신청일시는 상세 팝업을 열 필요 없이 목록 표의 오른쪽 열에 이미 있다
+    # (가로 스크롤로 가려져 있을 뿐) → 표 머리글 이름으로 열을 찾아 읽는다.
+    BOOKING_URL = "https://business.kakao.com/booking/reservation"
+    BOOKING_STATUS = "예약신청"
+    # 대시보드 '내용' 앞 표식 — Index.html SUBKINDS 가 이걸로 '카카오 예약' 꼬리표를 단다.
+    BOOKING_MARK = "[예약] "
+    # 시트 블록: 같은 '카카오톡' 탭의 H열 이후. 채팅 블록(B3:F1000)과 안 겹친다.
+    BOOKING_START = "H3"
+    BOOKING_CLEAR = "H3:L1000"
+    BOOKING_HEADER_CELL = "H2"
+    BOOKING_HEADERS = ["예약신청일시", "예약자명", "상품명", "연락처", "예약번호"]
+    SHEET_CLEAR_EXTRA = (BOOKING_CLEAR,)
+
     @staticmethod
     def _at_login(driver) -> bool:
         u = driver.current_url
@@ -4329,18 +4346,153 @@ class KakaoTalkChannel(BaseChannel):
                 "date": self._blk_text(blk, "span.txt_date"),
                 "num": n,
             })
+
+        # ── 카카오 예약(확정대기)도 같은 탭에서 이어서 수집 ──────────
+        # 예약 쪽이 깨져도 채팅 결과는 살린다(전체를 실패로 만들지 않음).
+        # 다음 사이클에 BrowserHub 가 LIST_URL 로 다시 열므로 되돌릴 필요 없다.
+        try:
+            out.extend(self.scrape_bookings(driver))
+        except Exception as e:
+            print(f"[{self.name}] 카카오 예약 수집 건너뜀: {classify_error(e).detail}")
         return out
 
+    # ── 카카오 예약 페이지 ─────────────────────────────────────
+    # 표 머리글(공백 제거) → 열 번호, 행 칸 글자, '확정대기' 숫자를 한 번에 읽는다.
+    # 칸 글자는 textContent 로 읽는다 — 가로 스크롤로 가려진 열(예약신청일시 등)도
+    # 빠짐없이 읽기 위해서(셀레니움 .text 는 화면에 보이는 글자만 준다).
+    # 예약자명 칸엔 '톡보내기' 버튼이 같이 있어 .txt_lineclamp 를 우선 본다.
+    _BOOKING_JS = r"""
+var t = document.querySelector('.table_reserve table') ||
+        document.querySelector('table.tbl_comm');
+var pend = null;
+document.querySelectorAll('.list_status .link_status').forEach(function(a){
+  var k = a.querySelector('.tit_status'), v = a.querySelector('.txt_status');
+  if (k && v && k.textContent.replace(/\s+/g,'') === '확정대기')
+    pend = parseInt(v.textContent.replace(/[^0-9]/g,''), 10);
+});
+if (!t) return {heads: [], rows: [], pend: pend};
+var clean = function(s){ return (s || '').replace(/\s+/g,' ').trim(); };
+var heads = Array.prototype.map.call(t.querySelectorAll('thead th'),
+  function(th){ return th.textContent.replace(/\s+/g,''); });
+var rows = Array.prototype.map.call(t.querySelectorAll('tbody tr'), function(tr){
+  return Array.prototype.map.call(tr.children, function(td){
+    var c = td.querySelector('.txt_lineclamp') || td;
+    return clean(c.textContent);
+  });
+});
+return {heads: heads, rows: rows, pend: pend};
+"""
+
+    def _read_bookings(self, driver) -> tuple:
+        """현재 화면의 예약 표에서 '예약신청' 행만 → ([dict], 확정대기 숫자|None)."""
+        res = driver.execute_script(self._BOOKING_JS) or {}
+        heads = res.get("heads") or []
+        if heads:
+            self.signature["예약 머리글"] = heads   # 개편 감지용(빈값이면 유지)
+        idx = {}
+        for i, h in enumerate(heads):
+            if h:
+                idx.setdefault(h, i)
+        # 머리글을 못 읽었을 때만 쓰는 기본 위치(2026-11 실측 순서)
+        FALLBACK = {"예약상태": 1, "예약자명": 2, "예약자연락처": 3, "예약번호": 4,
+                    "이용자명": 6, "이용자연락처": 7, "상품명": 12, "예약신청일시": 17}
+
+        def col(cells, key):
+            i = idx.get(key, FALLBACK.get(key))
+            return cells[i] if (i is not None and i < len(cells)) else ""
+
+        out = []
+        for cells in res.get("rows") or []:
+            if col(cells, "예약상태").replace(" ", "") != self.BOOKING_STATUS:
+                continue
+            out.append({
+                "kind": "booking",
+                "name": col(cells, "예약자명") or col(cells, "이용자명"),
+                "product": col(cells, "상품명"),
+                "applied": col(cells, "예약신청일시"),
+                "contact": col(cells, "예약자연락처") or col(cells, "이용자연락처"),
+                "resv_no": col(cells, "예약번호"),
+            })
+        return out, res.get("pend")
+
+    def _click_pending_tab(self, driver) -> bool:
+        """상단 '확정대기' 숫자를 눌러 목록을 확정대기 건으로 좁힌다(되면 True)."""
+        from selenium.webdriver.common.by import By
+        for a in driver.find_elements(By.CSS_SELECTOR, ".list_status a.link_status"):
+            if "확정대기" in (a.get_attribute("textContent") or "").replace(" ", ""):
+                try:
+                    driver.execute_script("arguments[0].click();", a)
+                    time.sleep(2.0)
+                    return True
+                except Exception:
+                    return False
+        return False
+
+    def scrape_bookings(self, driver) -> List[dict]:
+        """카카오 예약 목록에서 예약상태 '예약신청'(=확정대기)인 건만 반환."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        load_page(driver, self.BOOKING_URL, label=self.name)
+        if self._at_login(driver):
+            raise RuntimeError("카카오 예약 페이지가 로그인 화면으로 넘어갔습니다")
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, ".list_status .txt_status, .table_reserve table")))
+        # 표·숫자는 비동기로 채워진다 → 확정대기 숫자만큼 행이 뜰 때까지 잠깐 기다림
+        items, pend = [], None
+        end = time.monotonic() + 10
+        while True:
+            time.sleep(1.0)
+            items, pend = self._read_bookings(driver)
+            if pend is not None and len(items) >= pend:
+                break
+            if time.monotonic() >= end:
+                break
+
+        # 기본 조회는 '최근 한주'·'전체 상태'·1페이지다. 확정대기 숫자보다 적게 잡혔으면
+        # (오래된 신청이거나 다음 페이지로 밀림) '확정대기' 를 눌러 한 번 더 읽는다.
+        if pend and len(items) < pend and self._click_pending_tab(driver):
+            more, _ = self._read_bookings(driver)
+            seen = {it["resv_no"] for it in items}
+            items += [it for it in more if it["resv_no"] not in seen]
+        if pend is not None and len(items) < pend:
+            print(f"[{self.name}] 카카오 예약: 확정대기 {pend}건 중 {len(items)}건만 "
+                  f"목록에서 찾았습니다(조회기간/페이지 확인 필요)")
+        return items
+
     def to_sheet_rows(self, items: list) -> list:
-        # B이름 C내용 D시각 E개수
-        return [[it["name"], it["info"], it["date"], it["num"]] for it in items]
+        # B이름 C내용 D시각 E개수 (채팅만 — 예약은 extra_sheet_data 로 H열에)
+        return [[it["name"], it["info"], it["date"], it["num"]]
+                for it in items if it.get("kind") != "booking"]
+
+    def extra_sheet_data(self, items: list) -> list:
+        bs = [it for it in items if it.get("kind") == "booking"]
+        if not bs:
+            return []
+        return [{"range": self.BOOKING_START,
+                 "values": [[_to_sheet_date(it["applied"]), it["name"], it["product"],
+                             it["contact"], it["resv_no"]] for it in bs]}]
+
+    def after_write(self, ws) -> None:
+        # 예약 블록 머리글(H2~) + 신청일시 열 날짜 표시서식
+        ws.update(values=[self.BOOKING_HEADERS], range_name=self.BOOKING_HEADER_CELL)
+        ws.format(f"{self.BOOKING_START}:H1000",
+                  {"numberFormat": {"type": "DATE_TIME",
+                                    "pattern": "yyyy.mm.dd hh:mm"}})
 
     def dashboard_rows(self, items: list) -> list:
-        # [이름=카톡이름, 내용, 시각(상대표시), 연락처=없음]
+        # 채팅: [이름=카톡이름, 내용, 시각(상대표시), 연락처=없음]
         # 한 사람이 여러 톡을 보내도 '채팅방 1개 = 상담 1건'이므로 타일 숫자는 그대로 두고,
         # 안 읽은 메시지 수(span.num_round)는 내용 앞에 붙여 상세에서 보이게 한다.
+        # 예약: [이름=예약자명, 내용='[예약] 상품명', 시각=예약신청일시, 연락처]
         out = []
         for it in items:
+            if it.get("kind") == "booking":
+                out.append([it["name"] or "카카오 예약",
+                            self.BOOKING_MARK + (it["product"] or "(상품명 없음)"),
+                            _to_sheet_date(it["applied"]), it["contact"]])
+                continue
             n = it.get("num", 0)
             info = f"{it['info']} ({n})" if n > 1 else it["info"]
             out.append([it["name"], info, it["date"], ""])
