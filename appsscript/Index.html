@@ -1,0 +1,2089 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <base target="_top">
+  <style>
+    :root {
+      --bg: #f4f6f8; --surface: #ffffff; --surface-2: #fafbfc;
+      --border: #e3e7ec; --text: #191d23; --text-2: #5b6570; --text-3: #8a929c;
+      --accent: #0d9488; --warn: #d97706; --crit: #e5484d; --crit-soft: #fdecec;
+      --shadow: 0 1px 2px rgba(20,30,45,.04), 0 2px 8px rgba(20,30,45,.05);
+      --radius: 12px; color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #101317; --surface: #191d23; --surface-2: #1e242b;
+        --border: #2a313a; --text: #e9ecef; --text-2: #a4adb7; --text-3: #79828d;
+        --accent: #2dd4bf; --warn: #fbbf24; --crit: #ff6369; --crit-soft: #2a1a1c;
+        --shadow: 0 1px 2px rgba(0,0,0,.25), 0 2px 10px rgba(0,0,0,.3);
+        color-scheme: dark;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text); line-height: 1.5;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic",
+        "맑은 고딕", "Apple SD Gothic Neo", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 1240px; margin: 0 auto; padding: 28px 22px 60px; }
+    /* 헤더는 스크롤해도 상단에 붙어 있는다(미확인 건수·알람 끄기를 항상 보이게).
+       배경을 깔아야 밑으로 지나가는 타일/표가 비치지 않는다. */
+    header {
+      position: sticky; top: 0; z-index: 40;
+      background: var(--bg);
+      display: flex; align-items: stretch; gap: 16px; flex-wrap: wrap;
+      padding-bottom: 20px; margin-bottom: 22px; border-bottom: 1px solid var(--border);
+      transition: box-shadow .15s;
+    }
+    /* 실제로 붙어 있을 때만 그림자 — 맨 위에서는 평평하게 */
+    header.stuck { box-shadow: 0 6px 16px -8px rgba(20,30,45,.28); }
+    @media (prefers-color-scheme: dark) {
+      header.stuck { box-shadow: 0 6px 16px -6px rgba(0,0,0,.6); }
+    }
+    /* 왼쪽: 2열 그리드(1열=제목/시각, 2열=미확인·알람 / 수집중·상태).
+       → 2열 시작점이 두 줄에서 같아져 '미확인 상담'과 '수집 중'이 같은 열에서 시작한다. */
+    .hleft {
+      flex: 1 1 auto; min-width: 0; display: grid;
+      grid-template-columns: auto 1fr; align-items: center; gap: 12px 16px;
+    }
+    /* 미확인 상담 + 알람 끄기(2열, 첫 줄) */
+    .halarm { display: flex; align-items: center; gap: 10px; }
+    /* 수집중·작동중·새로고침(2열, 둘째 줄) */
+    .hrow-sub { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    /* 오른쪽: 채널별 최종 업데이트 시각(각 시트 A1). 왼쪽 2줄 높이를 통째로 씀. */
+    .chtimes {
+      align-self: stretch; display: grid; grid-auto-flow: column;
+      grid-template-rows: repeat(3, 1fr); align-content: center; gap: 5px 20px;
+      padding: 10px 16px; border-radius: 12px;
+      background: var(--surface-2); border: 1px solid var(--border);
+    }
+    .chtimes[hidden] { display: none; }
+    .chtimes .ct-item { display: flex; align-items: baseline; justify-content: space-between;
+                        gap: 10px; font-size: 11.5px; white-space: nowrap; }
+    .chtimes .ct-name { color: var(--text-2); font-weight: 600; }
+    .chtimes .ct-ago { color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .chtimes .ct-item.stale .ct-ago { color: var(--crit); font-weight: 700; }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -.01em; }
+    .brand .dot {
+      width: 9px; height: 9px; border-radius: 50%; background: var(--accent);
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+    }
+    .ts { font-size: 12.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    /* 미확인 상담 = 헤더 히어로. 미확인이 있으면 붉게 강조. */
+    .total {
+      display: flex; align-items: baseline; gap: 8px;
+      padding: 10px 18px; border-radius: 999px; background: var(--crit-soft);
+      border: 1px solid color-mix(in srgb, var(--crit) 35%, transparent);
+    }
+    .total.ok {
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    }
+    .total .lbl { font-size: 13px; color: var(--text-2); font-weight: 700; }
+    .total b { font-size: 26px; font-weight: 800; color: var(--crit); font-variant-numeric: tabular-nums; line-height: 1; }
+    .total.ok b { color: var(--accent); }
+    .total .unit { font-size: 13px; color: var(--text-2); }
+    /* 수집 중인 PC 이름 배지 */
+    .host {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 999px;
+      white-space: nowrap; color: var(--text-2);
+      background: var(--surface-2); border: 1px solid var(--border);
+      font-variant-numeric: tabular-nums;
+    }
+    .host[hidden] { display: none; }
+    .host::before { content: "🖥"; font-size: 11px; }
+    /* 수집기가 돌고 있으면 초록, 멈췄으면 회색 */
+    .host.on {
+      color: #0f9d6e; background: color-mix(in srgb, #10b981 10%, transparent);
+      border-color: color-mix(in srgb, #10b981 30%, transparent);
+    }
+    .host.off { opacity: .75; }
+    /* 수집 중인 코드 버전 배지(시트 H3). 어느 PC가 몇 버전으로 도는지 화면에서 확인 */
+    .ver {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 999px;
+      white-space: nowrap; color: var(--text-2);
+      background: var(--surface-2); border: 1px solid var(--border);
+      font-variant-numeric: tabular-nums;
+    }
+    .ver[hidden] { display: none; }
+    /* 개발 PC에서 소스로 직접 돌리는 경우(자동 업데이트 대상이 아님) 구분 표시 */
+    .ver.dev {
+      color: #b45309; background: color-mix(in srgb, #f59e0b 12%, transparent);
+      border-color: color-mix(in srgb, #f59e0b 32%, transparent);
+    }
+    .status { font-size: 12px; font-weight: 700; padding: 5px 11px; border-radius: 999px; white-space: nowrap; }
+    .status.live {
+      color: #0f9d6e; background: color-mix(in srgb, #10b981 13%, transparent);
+      border: 1px solid color-mix(in srgb, #10b981 30%, transparent);
+    }
+    .status.dead {
+      color: var(--crit); background: var(--crit-soft);
+      border: 1px solid color-mix(in srgb, var(--crit) 30%, transparent);
+    }
+    /* 루프는 살아있지만 일부 채널 수집이 실패한 상태 */
+    .status.warn {
+      color: #b26b00; background: color-mix(in srgb, #f59e0b 15%, transparent);
+      border: 1px solid color-mix(in srgb, #f59e0b 38%, transparent);
+    }
+
+    /* ── 즉시 새로고침 버튼 ─────────────────────────────── */
+    .refresh {
+      display: inline-flex; align-items: center; gap: 6px;
+      font: inherit; font-size: 13px; font-weight: 700; cursor: pointer;
+      padding: 8px 14px; border-radius: 999px; white-space: nowrap;
+      border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+      background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent);
+      transition: background .12s, border-color .12s, transform .05s;
+    }
+    .refresh:hover { background: color-mix(in srgb, var(--accent) 16%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+    .refresh:active { transform: translateY(1px); }
+    .refresh:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .refresh:disabled { opacity: .6; cursor: default; }
+    .refresh .ic { display: inline-block; line-height: 1; }
+    .refresh.spinning .ic { animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .refresh.spinning .ic { animation: none; } }
+
+    /* ── 알람 끄기 버튼 (헤더) ─────────────────────────────── */
+    .bell {
+      display: inline-flex; align-items: center; gap: 7px;
+      font: inherit; font-size: 13px; font-weight: 700; cursor: pointer;
+      padding: 9px 15px; border-radius: 999px; white-space: nowrap;
+      border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+      transition: background .12s, border-color .12s, color .12s, transform .05s;
+    }
+    .bell:active { transform: translateY(1px); }
+    .bell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .bell[hidden] { display: none; }
+    /* 울리는 중: 붉게 강조 + 흔들림 */
+    .bell.ringing {
+      color: #fff; background: var(--crit); border-color: transparent;
+      animation: bellshake 1s ease-in-out infinite;
+    }
+    .bell.ringing .ic { display: inline-block; transform-origin: 50% 10%; }
+    /* 잠재움: 조용한 회색 */
+    .bell.muted { color: var(--text-3); }
+    @keyframes bellshake {
+      0%, 100% { transform: rotate(0); }
+      15% { transform: rotate(-11deg); } 30% { transform: rotate(9deg); }
+      45% { transform: rotate(-6deg); } 60% { transform: rotate(4deg); } 75% { transform: rotate(-2deg); }
+    }
+    @media (prefers-reduced-motion: reduce) { .bell.ringing { animation: none; } }
+
+    /* 채널이 8개(7채널 + 인스타)라 최소폭이 152px 이면 한 칸이 다음 줄로 혼자
+       떨어진다(1180px 화면에서 7칸까지만 들어감). 최소폭을 낮춰 한 줄에 담는다.
+       채널이 더 늘면 이 값을 다시 낮추거나 max-width 를 키울 것. */
+    .tiles {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+      gap: 12px; margin-bottom: 30px;
+    }
+    .tile {
+      position: relative; display: flex; flex-direction: column;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      padding: 14px 14px 13px; box-shadow: var(--shadow); overflow: hidden;
+      transition: border-color .12s, box-shadow .12s;
+    }
+    .tile.active { border-color: color-mix(in srgb, var(--ch) 42%, var(--border)); }
+    .tile::before {
+      content: ""; position: absolute; inset: 0 0 auto 0; height: 3px;
+      background: var(--ch); opacity: .16;
+    }
+    .tile.active::before { opacity: 1; }
+    .tile.failed::before { background: var(--warn); opacity: 1; }
+    .tile .thead { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+    .tile .ico {
+      width: 30px; height: 30px; border-radius: 9px; flex: none;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: color-mix(in srgb, var(--ch) 14%, transparent); color: var(--ch);
+    }
+    .tile .ico svg { width: 18px; height: 18px; }
+    .tile.zero .ico { opacity: .75; }
+    .tile.failed .ico { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+    .tile .cname {
+      font-size: 13px; font-weight: 600; color: var(--text-2);
+      /* 예전엔 한 줄 고정 + '…' 이었는데 '인스타_잠재고객'처럼 긴 이름이
+         '인스타_잠…' 으로 잘렸다. 좁은 칸에서는 두 줄로 접어 그대로 보여준다. */
+      line-height: 1.25; overflow-wrap: anywhere;
+    }
+    .tile .num {
+      font-size: 38px; font-weight: 800; letter-spacing: -.02em; line-height: 1.05;
+      margin: 6px 0 1px; font-variant-numeric: tabular-nums; color: var(--text);
+    }
+    .tile.active .num { color: var(--ch); }
+    .tile.zero .num { color: var(--text-3); }
+    .tile.failed .num { color: var(--warn); }
+    .tile .sub { font-size: 12px; color: var(--text-3); font-weight: 500; }
+    /* 타일 '미확인 상담' 옆 내역(예: '예약 4 · Q&A 2'). 합계는 위 숫자 그대로 두고
+       무엇으로 이뤄졌는지만 덧붙인다. */
+    .tile .sub .brk { color: var(--text-2); font-weight: 600; }
+    .tile .flag {
+      align-self: flex-start; display: inline-flex; align-items: center; gap: 5px;
+      margin-top: 9px; padding: 3px 9px; border-radius: 999px;
+      font-size: 11px; font-weight: 700; color: var(--crit); background: var(--crit-soft);
+    }
+    .tile .flag::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--crit); }
+    .tile.zero .flag { display: none; }
+    .flag.err { color: var(--warn); background: color-mix(in srgb, var(--warn) 13%, transparent); }
+    .flag.err::before { background: var(--warn); }
+    .tile .bal {
+      margin-top: 11px; margin-bottom: 13px; padding-top: 10px;
+      border-top: 1px dashed var(--border);
+      font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums;
+    }
+    .tile .bal .b { font-weight: 700; color: var(--text); }
+    .tile .bal .note { display: block; color: var(--text-3); font-size: 11px; margin-top: 2px; }
+    /* ── 금일 현황(다른 문서 TODAY 시트 A3:J6) ────────────────────────
+       시트를 표 그대로 옮기면 병합 폭 때문에 칸이 들쭉날쭉해진다.
+       라벨 줄과 숫자 줄을 열 위치로 짝지어 '지표 카드'로 다시 조립한다.
+       카드 색(--ch)은 아래 채널 타일과 같은 색을 쓴다(카톡=노랑, 온상=파랑…). */
+    #todaySec[hidden] { display: none; }
+    #todaySec { margin-bottom: 26px; }
+    /* 요일별 테마는 렌더할 때 --th-* 로 주입한다(월=빨강 … 토=보라).
+       글씨는 왼쪽(그라데이션의 진한 쪽)에 놓이므로 대비는 --th-from 기준으로 잡았다. */
+    .today-head {
+      position: relative; display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
+      padding: 13px 18px; color: var(--th-fg, #fff);
+      background: linear-gradient(100deg,
+        var(--th-from, #0f766e) 0%, var(--th-to, #0ea5e9) 100%);
+    }
+    /* 다크에서는 같은 색을 한 톤 죽여 화면이 튀지 않게 한다 */
+    @media (prefers-color-scheme: dark) {
+      .today-head { filter: brightness(.86) saturate(.92); }
+    }
+    .today-head h2 { margin: 0; font-size: 14.5px; font-weight: 700; letter-spacing: -.01em; }
+    .today-head .date {
+      font-size: 12.5px; font-weight: 600; opacity: .85; font-variant-numeric: tabular-nums;
+    }
+    .today-head .date::before { content: "·"; margin-right: 8px; opacity: .55; }
+    /* 강조 세트 바로 위에 걸치는 'TOTAL' 띠. 위치·폭은 렌더할 때 --hl-* 로 주입해
+       아래 연노랑 칸과 정확히 같은 구간을 덮는다. */
+    .today-total {
+      position: absolute; top: 0; bottom: 0;
+      left: var(--hl-left, 0); width: var(--hl-w, 0);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 800; letter-spacing: .14em;
+      background: rgba(255, 255, 255, .17); pointer-events: none;
+    }
+    .today-total[hidden] { display: none; }
+    /* 좁은 화면에서는 그리드가 접혀 강조 세트가 오른쪽 끝이 아니게 된다 → 숨긴다 */
+    @media (max-width: 980px) { .today-total { display: none; } }
+    /* 열 개수는 렌더할 때 --cols 로 넣는다. 모든 열이 같은 폭이라
+       '카톡문의' 처럼 한 세트가 두 칸이어도 칸 크기가 어긋나지 않는다.
+       나눔선은 box-shadow — 줄바꿈돼도 어긋나지 않고 빈 칸에 회색이 남지 않는다. */
+    .today-grid { display: grid; grid-template-columns: repeat(var(--cols, 6), minmax(0, 1fr)); }
+    @media (max-width: 980px) { .today-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+    @media (max-width: 520px) { .today-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    .tcol {
+      display: flex; flex-direction: column; min-width: 0;
+      padding: 12px 13px 13px; background: var(--surface);
+      box-shadow: -1px 0 0 var(--border), 0 -1px 0 var(--border);
+    }
+    /* 한 세트 안쪽 칸(신규콜|초진콜, 카톡문의|카톡예약 …)은 세로 구분선을 지운다.
+       → 선이 세트와 세트 사이에만 남아 묶음이 한눈에 보인다. */
+    .tcol.gsub { box-shadow: 0 -1px 0 var(--border); }
+    /* 실 예약으로 이어진 칸(초진콜·카톡예약)은 연노랑 배경으로 따로 짚어 둔다.
+       hero 칸보다 먼저 적어 hero 의 초록 배경이 이 색을 덮게 한다(같은 우선순위). */
+    .tcol.mark { background: #fdf6dd; }
+    @media (prefers-color-scheme: dark) {
+      .tcol.mark { background: color-mix(in srgb, var(--warn) 13%, var(--surface)); }
+    }
+    /* 실제 예약 수 한 칸(hero)만 배경을 깐다. 색은 대시보드 기본 강조색(--accent).
+       요일마다 바뀌는 헤더색과 달리 이 색은 버튼·태그·브랜드 점에 이미 쓰이고 있어
+       어떤 요일 테마 밑에 와도 겉돌지 않는다. 숫자도 같은 색이라 한 덩어리로 읽힌다.
+       구분선은 다른 칸과 똑같이 둔다 — 위쪽 색선은 통일감을 해쳐서 뺐다. */
+    .tcol.hero {
+      background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+    }
+    @media (prefers-color-scheme: dark) {
+      .tcol.hero { background: color-mix(in srgb, var(--accent) 14%, var(--surface)); }
+    }
+    .tcol.hero .tlabel { color: var(--text); font-weight: 800; }
+    .tcol.hero .tnum { font-size: 40px; letter-spacing: -.035em; }
+    .tcol.hero .tnote { font-size: 11.5px; }
+    .tcol.hero .tbar { height: 6px; margin-top: 11px; }
+    .tcol.hero .tprev { color: var(--text-2); }
+    .tlabel {
+      display: flex; align-items: center; gap: 6px; margin-bottom: 8px;
+      font-size: 12px; font-weight: 700; color: var(--text-2); white-space: nowrap;
+    }
+    /* 이름이 길면 이름만 줄이고 증감 배지는 항상 보이게 한다 */
+    .tlabel .tname { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    /* 어제 대비 증감. 늘었으면 빨강, 줄었으면 파랑(0 은 회색). */
+    .tdelta {
+      flex: none; margin-left: auto; padding-left: 4px;
+      font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums;
+    }
+    .tdelta.up { color: var(--crit); }
+    .tdelta.down { color: #2563eb; }
+    .tdelta.same { color: var(--text-3); font-weight: 700; }
+    @media (prefers-color-scheme: dark) { .tdelta.down { color: #60a5fa; } }
+    .tlabel::before {
+      content: ""; flex: none; width: 7px; height: 7px; border-radius: 2px; background: var(--ch);
+    }
+    /* 아이콘이 붙는 열은 색 점 대신 아이콘을 쓴다(예: 실 예약 = 캘린더 체크) */
+    .tcol.hasico .tlabel::before { display: none; }
+    .tlabel .tico { flex: none; width: 15px; height: 15px; color: var(--ch); }
+    .tnumrow { display: flex; align-items: baseline; gap: 6px; margin-top: auto; min-width: 0; }
+    .tnum {
+      font-size: 27px; font-weight: 800; line-height: 1.05;
+      letter-spacing: -.03em; font-variant-numeric: tabular-nums; color: var(--ch);
+    }
+    .tcol.zero .tnum { color: var(--text-3); }
+    /* 숫자 뒤 파란 꼬리표(예: '실 예약') — 어느 숫자가 실적인지 표시 */
+    .tnote {
+      font-size: 11px; font-weight: 700; color: #2563eb;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    @media (prefers-color-scheme: dark) { .tnote { color: #7dd3fc; } }
+    /* 어제 대비 막대 — 숫자만으로는 안 보이는 '오늘이 어느 정도 왔나'를 한눈에 */
+    .tbar {
+      height: 4px; margin: 9px 0 6px; border-radius: 999px; overflow: hidden;
+      background: color-mix(in srgb, var(--ch) 15%, transparent);
+    }
+    .tbar i { display: block; height: 100%; border-radius: 999px; background: var(--ch); }
+    .tprev {
+      display: block; font-size: 11px; color: var(--text-3);
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    .tprev b { font-weight: 700; color: var(--text-2); }
+    /* ── 칸 마우스오버 명단 ────────────────────────────────────
+       명단은 카드(.card)가 overflow:hidden 이라 안쪽에 두면 잘린다.
+       → body 직속의 떠 있는 패널 하나를 자바스크립트로 옮겨 쓴다. */
+    .tcol.hasdet { cursor: pointer; }
+    .tcol.hasdet .tname { text-decoration: underline dotted; text-underline-offset: 3px; }
+    .tcol.hasdet:hover .tname { text-decoration-style: solid; }
+    /* 지금 명단이 열려 있는 칸 */
+    .tcol.hasdet.open { box-shadow: 0 -1px 0 var(--border), inset 0 0 0 2px var(--accent); }
+    .tip .tip-h { display: flex; align-items: center; gap: 8px; }
+    .tip .tip-x {
+      margin-left: auto; flex: none; cursor: pointer; font: inherit; font-size: 15px;
+      line-height: 1; padding: 2px 6px; border-radius: 6px; color: var(--text-3);
+      background: transparent; border: 1px solid transparent;
+    }
+    .tip .tip-x:hover { color: var(--text); border-color: var(--border); }
+    .tip {
+      /* fixed 가 아니라 absolute — 페이지와 함께 스크롤된다.
+         fixed 로 두면 스크롤할 때마다 위치를 다시 잡아 줘야 하는데, 그 스크롤
+         처리가 '명단 안에서 굴리는 스크롤'과 얽혀 목록을 읽는 중에 닫혔다. */
+      position: absolute; z-index: 60; max-width: min(620px, 94vw); max-height: 56vh;
+      overflow: auto; border-radius: 10px; font-size: 12px; color: var(--text);
+      background: var(--surface); border: 1px solid var(--border);
+      box-shadow: 0 10px 30px -10px rgba(20,30,45,.42);
+    }
+    @media (prefers-color-scheme: dark) {
+      .tip { box-shadow: 0 10px 30px -8px rgba(0,0,0,.7); }
+    }
+    .tip[hidden] { display: none; }
+    .tip .tip-h {
+      position: sticky; top: 0; z-index: 1; padding: 8px 11px; font-weight: 700;
+      background: var(--surface-2); border-bottom: 1px solid var(--border);
+    }
+    .tip .tip-h .n { color: var(--text-3); font-weight: 600; }
+    .tip .tip-msg { padding: 14px 12px; color: var(--text-3); text-align: center; }
+    /* 아래 '미확인 상세' 표의 전역 규칙(min-width:760px 등)을 덮는다 */
+    .tip table { width: 100%; min-width: 0; border-collapse: collapse; }
+    .tip th, .tip td {
+      padding: 6px 11px; text-align: left; white-space: nowrap;
+      border-bottom: 1px solid var(--border); font-size: 12px;
+    }
+    .tip th {
+      color: var(--text-3); font-size: 11px; font-weight: 700;
+      background: var(--surface-2); text-transform: none; letter-spacing: 0;
+    }
+    .tip tbody tr:last-child td { border-bottom: none; }
+    .tip td:first-child { font-weight: 600; color: var(--text); }
+    /* 맨 앞 번호 열 — 좁게, 흐리게. 이름 열이 첫 칸이 아니게 되므로
+       위의 td:first-child(굵게) 는 번호에 걸린다 → 여기서 되돌린다. */
+    .tip th.no, .tip td.no {
+      width: 1%; text-align: right; color: var(--text-3); font-weight: 600;
+      font-variant-numeric: tabular-nums; padding-right: 4px;
+    }
+    .tip td.no + td { font-weight: 600; color: var(--text); }
+    .tip .tip-more {
+      padding: 7px 11px; color: var(--text-3); text-align: center;
+      border-top: 1px solid var(--border); background: var(--surface-2);
+    }
+    .sec-h { display: flex; align-items: baseline; gap: 10px; margin: 0 0 12px; }
+    .sec-h h2 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+    .sec-h .cnt { font-size: 12.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+    }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
+    /* 열 너비: '내용' 열을 줄여 '이름' 칸을 확보(이름이 두 줄로 쪼개지지 않게) */
+    thead th:nth-child(1), tbody td:nth-child(1) { width: 106px; }  /* 채널 */
+    thead th:nth-child(2), tbody td:nth-child(2) { width: 116px; }  /* 이름 */
+    thead th:nth-child(3), tbody td:nth-child(3) { width: auto;  }  /* 내용 (남는 공간 흡수) */
+    thead th:nth-child(4), tbody td:nth-child(4) { width: 158px; }  /* 시각 */
+    thead th:nth-child(5), tbody td:nth-child(5) { width: 132px; }  /* 연락처 */
+    thead th:nth-child(6), tbody td:nth-child(6) { width: 108px; }  /* 바로가기 */
+    thead th {
+      text-align: left; font-size: 11.5px; font-weight: 700; letter-spacing: .03em;
+      color: var(--text-3); text-transform: uppercase; padding: 11px 16px;
+      background: var(--surface-2); border-bottom: 1px solid var(--border);
+    }
+    tbody td {
+      padding: 12px 16px; font-size: 13.5px; border-bottom: 1px solid var(--border);
+      color: var(--text); vertical-align: middle;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover td { background: var(--surface-2); }
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 7px;
+      border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap;
+      background: color-mix(in srgb, var(--ch) 12%, transparent);
+      color: color-mix(in srgb, var(--ch) 72%, var(--text));
+      border: 1px solid color-mix(in srgb, var(--ch) 30%, transparent);
+    }
+    .chip .cico { display: inline-flex; align-items: center; color: var(--ch); }
+    .chip .cico svg { width: 13px; height: 13px; }
+    /* 같은 채널 안에서 종류를 구분하는 꼬리표(강남언니 Q&A 등) */
+    .tag {
+      display: inline-block; margin-left: 5px; padding: 2px 7px; border-radius: 999px;
+      font-size: 11px; font-weight: 700; letter-spacing: .01em; white-space: nowrap;
+      color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+    }
+    td.nm { font-weight: 600; white-space: nowrap; }
+    /* 긴 이름은 말줄임 + 마우스오버(title)로 전체 표시 → 내용 열 폭 확보 */
+    td.nm .nm-t { display: block; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+    td.tm, td.ph { color: var(--text-2); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    td.ct { color: var(--text-2); }
+    td.go-cell { text-align: right; white-space: nowrap; }
+    .go {
+      display: inline-flex; align-items: center; gap: 4px; text-decoration: none;
+      font-size: 12px; font-weight: 600; white-space: nowrap; cursor: pointer;
+      color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+      background: color-mix(in srgb, var(--accent) 7%, transparent);
+      padding: 5px 11px; border-radius: 8px; transition: background .12s, border-color .12s;
+    }
+    .go:hover {
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    }
+    .go:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .tile .go { margin-top: auto; width: 100%; justify-content: center; }
+    .empty { padding: 34px; text-align: center; color: var(--text-3); font-size: 13.5px; }
+
+    /* ── 화면 전환 탭(실시간 / 초진기록) ───────────────────── */
+    .vtabs {
+      display: inline-flex; gap: 4px; padding: 4px; margin: 0 0 20px;
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px;
+    }
+    .vtab {
+      font: inherit; font-size: 13.5px; font-weight: 700; cursor: pointer;
+      padding: 8px 18px; border-radius: 9px; border: 0; background: transparent;
+      color: var(--text-2); transition: background .12s, color .12s, box-shadow .12s;
+    }
+    .vtab:hover { color: var(--text); }
+    .vtab.on { background: var(--surface); color: var(--accent); box-shadow: var(--shadow); }
+    .vtab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* ── 초진기록 화면 ─────────────────────────────────────── */
+    .lg { --c-a: var(--accent); --c-b: #E0AC00; --c-c: #6366f1; }
+    .lg-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+    .lg-top h2 { margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -.01em; }
+    .lg-sub { font-size: 12.5px; color: var(--text-3); }
+    .lg-range { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-left: auto; }
+    .lg-quick { display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px;
+                background: var(--surface-2); border: 1px solid var(--border); }
+    .lg-quick button { font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; padding: 5px 11px;
+                       border: 0; border-radius: 7px; background: transparent; color: var(--text-2); }
+    .lg-quick button:hover { color: var(--text); }
+    .lg-quick button.on { background: var(--surface); color: var(--accent); box-shadow: var(--shadow); }
+    .lg-dates { display: inline-flex; align-items: center; gap: 6px; }
+    .lg-dates input {
+      font: inherit; font-size: 13px; padding: 6px 8px; border-radius: 9px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--text); font-variant-numeric: tabular-nums;
+    }
+    .lg-dates input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+    .lg-dates .til { color: var(--text-3); }
+    .lg-month { display: inline-flex; align-items: center; gap: 4px; }
+    .lg-month b { min-width: 96px; text-align: center; font-size: 15px; font-variant-numeric: tabular-nums; }
+    .lg-month.off b { color: var(--text-3); font-weight: 600; }
+    .lg-today {
+      font: inherit; font-size: 13px; font-weight: 800; cursor: pointer; padding: 7px 14px; border-radius: 9px;
+      color: #fff; background: var(--accent); border: 1px solid var(--accent);
+      transition: opacity .12s, background .12s;
+    }
+    .lg-today:hover { opacity: .88; }
+    .lg-today.at { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent);
+                   border-color: color-mix(in srgb, var(--accent) 35%, transparent); cursor: default; }
+    .lg-nav {
+      font: inherit; width: 32px; height: 32px; border-radius: 9px; cursor: pointer;
+      border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+      font-size: 16px; line-height: 1;
+    }
+    .lg-nav:hover:not(:disabled) { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+    .lg-nav:disabled { opacity: .35; cursor: default; }
+
+    .lg-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+    .lg-kpi {
+      position: relative; padding: 16px 18px 15px; overflow: hidden;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: var(--shadow);
+    }
+    .lg-kpi::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--k); }
+    .lg-kpi .k-l { font-size: 12.5px; font-weight: 700; color: var(--text-2); }
+    .lg-kpi .k-v { display: block; margin-top: 4px; font-size: 30px; font-weight: 800; line-height: 1.1;
+                   letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+    .lg-kpi .k-v small { font-size: 14px; font-weight: 700; color: var(--text-3); margin-left: 3px; }
+    .lg-kpi .k-s { display: block; margin-top: 6px; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .lg-kpi.hero { background: color-mix(in srgb, var(--k) 7%, var(--surface));
+                   border-color: color-mix(in srgb, var(--k) 30%, var(--border)); }
+    .lg-kpi.hero .k-v { color: var(--k); }
+
+    .lg-chart { padding: 18px 18px 12px; margin-bottom: 16px; }
+    .lg-chart-h { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; font-size: 13px; }
+    .lg-chart-h b { font-size: 14px; }
+    .lg-legend { display: inline-flex; gap: 12px; margin-left: auto; color: var(--text-2); font-size: 12px; }
+    .lg-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+    .lg-bars { display: flex; align-items: flex-end; gap: 4px; height: 170px;
+               border-bottom: 1px solid var(--border); padding-top: 18px; }
+    .lg-bar { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column;
+              justify-content: flex-end; align-items: center; position: relative; }
+    .lg-bar .stk { width: 100%; max-width: 26px; display: flex; flex-direction: column-reverse;
+                   border-radius: 5px 5px 0 0; overflow: hidden; }
+    .lg-bar .stk i { display: block; }
+    .lg-bar .v { font-size: 11px; font-weight: 800; color: var(--text); margin-bottom: 3px;
+                 font-variant-numeric: tabular-nums; }
+    .lg-bar.zero .v { color: var(--text-3); font-weight: 600; }
+    .lg-bar.none .v { visibility: hidden; }
+    .lg-days { display: flex; gap: 4px; margin-top: 6px; }
+    .lg-days span { flex: 1; min-width: 0; text-align: center; font-size: 10.5px; color: var(--text-3);
+                    font-variant-numeric: tabular-nums; }
+    .lg-days .sat { color: #3b82f6; } .lg-days .sun { color: var(--crit); }
+    .lg-days .now { color: var(--accent); font-weight: 800; }
+
+    .lg { --c-A: #6366f1; --c-B: #94a3b8; }
+    .lg-main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 16px; align-items: start; }
+    @media (max-width: 1020px) { .lg-main { grid-template-columns: 1fr; } }
+    .lg table { min-width: 0; table-layout: fixed; }
+    .lg thead th, .lg tbody td, .lg tfoot td { width: auto; }
+    .lg thead th { padding: 11px 14px; }
+    .lg tbody td, .lg tfoot td { padding: 10px 14px; }
+    .lg tr.inA td:first-child { box-shadow: inset 3px 0 0 var(--c-A); }
+    .lg tr.inB td:first-child { box-shadow: inset 3px 0 0 var(--c-B); }
+    .lg .dlt { display: inline-block; min-width: 38px; padding: 2px 8px; border-radius: 999px; text-align: center;
+               font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .lg .dlt.up { color: #059669; background: color-mix(in srgb, #10b981 14%, transparent); }
+    .lg .dlt.down { color: var(--crit); background: color-mix(in srgb, var(--crit) 12%, transparent); }
+    .lg .dlt.same { color: var(--text-3); background: var(--surface-2); }
+
+    /* 기간 비교 패널 */
+    .lg-cmp { padding: 16px 16px 18px; }
+    .cmp-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
+    .cmp-h b { font-size: 15px; }
+    .cmp-presets { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 12px; }
+    .cmp-presets button {
+      font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; padding: 7px 8px;
+      border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+    }
+    .cmp-presets button:hover { color: var(--text); border-color: color-mix(in srgb, var(--c-A) 40%, var(--border)); }
+    .cmp-presets button.on { color: var(--c-A); border-color: var(--c-A);
+                             background: color-mix(in srgb, var(--c-A) 8%, transparent); }
+    .cmp-range { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+    .cmp-tag { flex: none; width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center;
+               font-size: 12px; font-weight: 800; color: #fff; background: var(--tc); }
+    .cmp-range.a { --tc: var(--c-A); } .cmp-range.b { --tc: var(--c-B); }
+    .cmp-range input {
+      flex: 1; min-width: 0; font: inherit; font-size: 13px; padding: 6px 8px; border-radius: 8px;
+      border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+    .cmp-range input:focus { outline: 2px solid color-mix(in srgb, var(--tc) 50%, transparent); outline-offset: 0; }
+    .cmp-range .til { color: var(--text-3); }
+    .cmp-body { margin-top: 14px; border-top: 1px solid var(--border); }
+    .cmp-m { padding: 12px 2px; border-bottom: 1px solid var(--border); }
+    .cmp-m:last-child { border-bottom: 0; padding-bottom: 0; }
+    .cmp-m .row1 { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .cmp-m .lbl { font-size: 13px; font-weight: 700; color: var(--text-2); }
+    .cmp-m .dlt { margin-left: auto; }
+    .cmp-m .pct { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .cmp-bar { display: grid; grid-template-columns: 16px 1fr 44px; align-items: center; gap: 8px; margin-top: 4px; }
+    .cmp-bar .t { font-size: 11px; font-weight: 800; color: var(--tc); }
+    .cmp-bar .tr { height: 10px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+    .cmp-bar .tr i { display: block; height: 100%; border-radius: 999px; background: var(--tc); }
+    .cmp-bar b { text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; }
+    .cmp-bar.a { --tc: var(--c-A); } .cmp-bar.b { --tc: var(--c-B); }
+    .cmp-bar.b b { color: var(--text-2); font-weight: 700; }
+    .cmp-note { margin-top: 10px; font-size: 11.5px; color: var(--text-3); }
+
+    /* ── 색 체계: 초진콜=초록 · 카톡=짙은 노랑 · 합계=보라. A/B 기간은 진한/연한 회청색 ── */
+    .lg { --c-a: #16a34a; --c-b: #f5b700; --c-b-t: #b88400; --c-c: #6366f1; --c-A: #334155; --c-B: #94a3b8; }
+    @media (prefers-color-scheme: dark) {
+      .lg { --c-a: #22c55e; --c-b: #facc15; --c-b-t: #facc15; --c-c: #818cf8; --c-A: #cbd5e1; --c-B: #64748b; }
+    }
+    .lg td.ca { color: var(--c-a); } .lg td.cb { color: var(--c-b-t); }
+    .lg td.ca.z, .lg td.cb.z { color: var(--text-3); }
+    .lg th .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: 1px; }
+    .lg tfoot td.ca { color: var(--c-a); } .lg tfoot td.cb { color: var(--c-b-t); } .lg tfoot td.cc { color: var(--c-c); }
+    .cmp-tag { color: var(--surface); }
+
+    /* 비교 막대: 지표마다 제 색. A=진하게, B=같은 색을 연하게 */
+    .cmp-m { --mc: var(--c-c); }
+    .cmp-m.ma { --mc: var(--c-a); } .cmp-m.mb { --mc: var(--c-b); } .cmp-m.mv { --mc: #64748b; }
+    .cmp-m.mb .cmp-bar.a b { color: var(--c-b-t); }
+    .cmp-m .lbl { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
+    .cmp-m .lbl::before { content: ""; width: 9px; height: 9px; border-radius: 3px; background: var(--mc); }
+    .cmp-bar.a .tr i { background: var(--mc); }
+    .cmp-bar.b .tr i { background: color-mix(in srgb, var(--mc) 38%, transparent); }
+    .cmp-bar.a b { color: var(--mc); font-weight: 800; }
+    .cmp-bar .t { color: var(--tc); }
+    .cmp-m { padding: 10px 2px; }
+
+    /* ── 날짜 칸: 'yyyy-MM-dd (요일)' 로 보여주고, 누르면 달력이 뜬다 ── */
+    .dp {
+      position: relative; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+      padding: 6px 10px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface);
+      font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; font-variant-numeric: tabular-nums;
+    }
+    .dp:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+    .dp:focus-within { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+    .dp::after {                                     /* 달력 아이콘 */
+      content: ""; width: 13px; height: 13px; flex: none; opacity: .55;
+      background: currentColor;
+      -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2'%3E%3Crect x='3' y='5' width='18' height='16' rx='2'/%3E%3Cpath d='M3 10h18M8 3v4M16 3v4'/%3E%3C/svg%3E") center / contain no-repeat;
+              mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2'%3E%3Crect x='3' y='5' width='18' height='16' rx='2'/%3E%3Cpath d='M3 10h18M8 3v4M16 3v4'/%3E%3C/svg%3E") center / contain no-repeat;
+    }
+    .dp .dp-t .dw { color: var(--text-3); font-weight: 600; }
+    .dp .dp-t .dw.sat { color: #3b82f6; } .dp .dp-t .dw.sun { color: var(--crit); }
+    .dp input { display: none; }
+    .dp.open { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+
+    /* ── 날짜 선택 달력(직접 그림 — 웹앱 iframe 에선 브라우저 기본 달력이 막힌다) ── */
+    .cal {
+      position: fixed; z-index: 100; width: 272px; padding: 12px; user-select: none;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      box-shadow: 0 10px 34px rgba(20,30,45,.18), 0 2px 6px rgba(20,30,45,.08);
+    }
+    .cal-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .cal-h b { font-size: 14.5px; font-variant-numeric: tabular-nums; }
+    .cal-h button { font: inherit; width: 30px; height: 30px; border-radius: 8px; cursor: pointer;
+                    border: 1px solid var(--border); background: var(--surface); color: var(--text-2); font-size: 15px; }
+    .cal-h button:hover:not(:disabled) { color: var(--accent); }
+    .cal-h button:disabled { opacity: .35; cursor: default; }
+    .cal-g { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; text-align: center; }
+    .cal-g .wk { font-size: 11px; font-weight: 700; color: var(--text-3); padding: 4px 0; }
+    .cal-g .wk.sun, .cal-g .d.sun { color: var(--crit); } .cal-g .wk.sat, .cal-g .d.sat { color: #3b82f6; }
+    .cal-g .d {
+      font: inherit; font-size: 13px; font-weight: 600; height: 34px; border-radius: 8px; cursor: pointer;
+      border: 0; background: transparent; color: var(--text); font-variant-numeric: tabular-nums;
+    }
+    .cal-g .d:hover:not(:disabled) { background: var(--surface-2); }
+    .cal-g .d.now { box-shadow: inset 0 0 0 1.5px var(--accent); }
+    .cal-g .d.sel { background: var(--accent); color: #fff; }
+    .cal-g .d:disabled { color: var(--text-3); opacity: .4; cursor: default; }
+    .cal-f { display: flex; justify-content: space-between; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+    .cal-f button { font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; border: 0;
+                    background: transparent; color: var(--accent); padding: 4px 6px; border-radius: 6px; }
+    .cal-f button:hover { background: var(--surface-2); }
+    .cmp-range .dp { flex: 1; min-width: 0; justify-content: space-between; background: var(--surface-2); }
+    .cmp-range .dp:focus-within { outline-color: color-mix(in srgb, var(--tc) 50%, transparent); }
+
+    /* ── 표 카드와 비교 카드 높이를 맞춘다: 행 높이는 비교 카드가 정하고, 표는 그 안에서 스크롤 ── */
+    .lg-main { align-items: stretch; }
+    .lg-tbl { position: relative; min-height: 360px; }
+    .lg-tbl .table-wrap { position: absolute; inset: 0; overflow: auto; }
+    .lg-tbl thead th { position: sticky; top: 0; z-index: 1; }
+    .lg-tbl tfoot td { position: sticky; bottom: 0; z-index: 1; }
+    .lg td.d { font-size: 13px; }
+    @media (max-width: 1020px) {
+      .lg-tbl { min-height: 0; }
+      .lg-tbl .table-wrap { position: static; max-height: 560px; }
+    }
+    .lg thead th.n, .lg td.n { text-align: right; }
+    .lg td.n { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .lg td.d { white-space: nowrap; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .lg td.d .dw { display: inline-block; margin-left: 5px; font-weight: 700; color: var(--text-3); }
+    .lg tr.sat .dw { color: #3b82f6; } .lg tr.sun .dw { color: var(--crit); }
+    .lg tr.today td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+    .lg tr.today .d::after {
+      content: "오늘"; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 10.5px;
+      color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    }
+    .lg td.z { color: var(--text-3); font-weight: 500; }
+    .lg .tb { display: flex; align-items: center; gap: 10px; justify-content: flex-end; }
+    .lg .tb b { min-width: 24px; text-align: right; font-size: 14.5px; color: var(--c-c); font-variant-numeric: tabular-nums; }
+    .lg .tb .track { flex: 1; max-width: 220px; height: 8px; border-radius: 999px;
+                     background: color-mix(in srgb, var(--c-c) 10%, transparent); overflow: hidden; }
+    .lg .tb .track i { display: block; height: 100%; border-radius: 999px; background: var(--c-c); }
+    .lg tfoot td {
+      padding: 12px 16px; font-size: 13.5px; font-weight: 800; background: var(--surface-2);
+      border-top: 1px solid var(--border); font-variant-numeric: tabular-nums;
+    }
+    /* ── 유입 채널 ── */
+    .lg-ch { padding: 18px 18px 16px; margin-bottom: 16px; }
+    .ch-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+    @media (max-width: 860px) { .ch-cols { grid-template-columns: 1fr; gap: 18px; } }
+    .ch-h { display: flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 800; margin-bottom: 8px;
+            padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+    .ch-h b { margin-left: auto; font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+    .ch-dot { width: 10px; height: 10px; border-radius: 3px; background: var(--k); }
+    .ch-row { display: grid; grid-template-columns: 112px 1fr 92px; align-items: center; gap: 10px; padding: 5px 0; }
+    .ch-row .nm { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ch-row .tr { height: 12px; border-radius: 999px; background: color-mix(in srgb, var(--k) 10%, transparent); overflow: hidden; }
+    .ch-row .tr i { display: block; height: 100%; border-radius: 999px; background: var(--k); }
+    .ch-row:nth-child(n+4) .tr i { background: color-mix(in srgb, var(--k) 60%, transparent); }
+    .ch-row .v { text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .ch-row .v b { font-size: 14px; }
+    .ch-row .v span { color: var(--text-3); font-size: 12px; margin-left: 5px; }
+    .ch-row.none .nm { color: var(--text-3); }
+    .ch-empty { padding: 14px 0; color: var(--text-3); font-size: 13px; }
+    @media (max-width: 860px) { .lg-kpis { grid-template-columns: repeat(2, 1fr); } }
+    .lg-bars { height: 230px; }
+    .lg-bar { border-radius: 8px 8px 0 0; }
+    .lg-bar.today { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+    .lg-bar .stk { max-width: 34px; }
+    .lg-bar .stk i { display: flex; align-items: center; justify-content: center; overflow: hidden;
+                     font-size: 10.5px; font-weight: 800; font-style: normal; line-height: 1; color: #fff; font-variant-numeric: tabular-nums; }
+    .lg-bar .stk i.sb { color: #3b2a00; }
+    .lg-bar .v { color: var(--text); font-size: 11.5px; font-weight: 800; padding: 0 5px; border-radius: 6px;
+                 background: color-mix(in srgb, var(--c-c) 12%, transparent);
+                 line-height: 1.5; margin-bottom: 3px; }
+    .lg-bar.zero .v { color: var(--text-3); background: transparent; }
+    .lg-days span { display: flex; flex-direction: column; align-items: center; gap: 1px; line-height: 1.25; }
+    .lg-days small { font-size: 10px; font-weight: 600; }
+    .lg-days .pill { display: block; width: 100%; color: #fff; background: var(--accent); border-radius: 999px;
+                     font-size: 9.5px; letter-spacing: .03em; padding: 1px 0; }
+    @media (max-width: 560px) {
+      .lg-legend { display: none; }
+      .lg-bar .v { font-size: 9px; }
+      .lg-days span { font-size: 9px; }
+    }
+    @media (max-width: 560px) {
+      .wrap { padding: 20px 14px 44px; }
+      .chtimes { align-self: stretch; width: 100%; grid-template-rows: repeat(2, 1fr); }
+      .brand h1 { font-size: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <!-- 왼쪽: 2열 그리드 → 1열(제목/시각) · 2열(미확인·알람 / 수집·상태) -->
+      <div class="hleft">
+        <!-- 1열·1행: 제목 -->
+        <div class="brand"><span class="dot"></span><h1>상담 통합 대시보드</h1></div>
+        <!-- 2열·1행: 미확인 상담 + 알람 끄기(순서: 미확인 → 알람) -->
+        <div class="halarm">
+          <div class="total" id="totalBox">
+            <span class="lbl">미확인 상담</span>
+            <b id="total">0</b><span class="unit">건</span>
+          </div>
+          <!-- 알람 벨: 미확인 ≥ 1 이면 나타남 -->
+          <button class="bell" id="bell" hidden type="button" aria-live="polite"
+                  title="알람 끄기 (단축키 F4)">
+            <span class="ic">🔔</span><span id="bellTxt">알람 끄기</span>
+          </button>
+        </div>
+        <!-- 1열·2행: 업데이트 시각 -->
+        <span class="ts" id="ts">불러오는 중…</span>
+        <!-- 2열·2행: 수집 PC · 작동 상태 · 새로고침 -->
+        <div class="hrow-sub">
+          <!-- 수집 중인 PC 이름(스탬프의 ' · 호스트명'에서 추출) -->
+          <span class="host" id="host" hidden></span>
+          <!-- 수집 중인 코드 버전(시트 H3) -->
+          <span class="ver" id="ver" hidden></span>
+          <span class="status" id="status"></span>
+          <!-- 즉시 새로고침: 클릭 시 곧바로 구글시트 재조회 -->
+          <button class="refresh" id="refreshBtn" type="button" title="지금 새로고침">
+            <span class="ic">🔄</span><span>새로고침</span>
+          </button>
+        </div>
+      </div>
+      <!-- 오른쪽: 채널별 최종 업데이트 시각(각 시트 A1). 왼쪽 2줄 높이 전체 사용 -->
+      <div class="chtimes" id="chtimes" hidden></div>
+    </header>
+    <!-- 화면 전환: 실시간(기존) / 초진기록. 실시간 폴링·알람은 어느 탭에서든 계속 돈다 -->
+    <nav class="vtabs" role="tablist">
+      <button class="vtab on" type="button" role="tab" data-view="live">실시간 현황</button>
+      <button class="vtab" type="button" role="tab" data-view="log">초진기록</button>
+    </nav>
+    <div id="viewLog" class="lg" hidden>
+      <div class="lg-top">
+        <h2>초진기록</h2>
+        <span class="lg-sub" id="lgSub">매일 저녁 9시 자동 기록</span>
+        <div class="lg-range">
+          <div class="lg-quick" id="lgQuick">
+            <button type="button" data-q="7">7일</button>
+            <button type="button" data-q="14">14일</button>
+            <button type="button" data-q="30">30일</button>
+          </div>
+          <div class="lg-dates">
+            <span class="dp" role="button" tabindex="0"><span class="dp-t"></span><input type="date" id="lgFrom" aria-label="시작일"></span><span class="til">~</span>
+            <span class="dp" role="button" tabindex="0"><span class="dp-t"></span><input type="date" id="lgTo" aria-label="종료일"></span>
+          </div>
+          <div class="lg-month">
+            <button class="lg-nav" id="lgPrev" type="button" aria-label="이전 달">‹</button>
+            <b id="lgMonth"></b>
+            <button class="lg-nav" id="lgNext" type="button" aria-label="다음 달">›</button>
+          </div>
+          <button class="lg-today" id="lgToday" type="button" title="이번 달 1일 ~ 오늘로 돌아가기">오늘</button>
+        </div>
+      </div>
+      <div class="lg-kpis" id="lgKpis"></div>
+      <div class="card lg-chart">
+        <div class="lg-chart-h"><b>일별 합계</b><span class="lg-sub">오른쪽이 최신 · 막대 안 숫자 = 초진콜 / 카톡 개수</span>
+          <span class="lg-legend">
+            <span><i style="background:var(--c-a)"></i>초진콜</span>
+            <span><i style="background:var(--c-b)"></i>카톡</span>
+            <span><i style="background:color-mix(in srgb, var(--c-c) 22%, transparent)"></i>합계(위 숫자)</span>
+          </span>
+        </div>
+        <div class="lg-bars" id="lgBars"></div>
+        <div class="lg-days" id="lgDays"></div>
+      </div>
+      <div class="card lg-ch">
+        <div class="lg-chart-h"><b>유입 채널</b><span class="lg-sub" id="chSub">선택한 기간 기준</span></div>
+        <div class="ch-cols">
+          <div class="ch-col" style="--k:var(--c-a)"><div class="ch-h"><span class="ch-dot"></span>초진콜<b id="chTotA"></b></div><div id="chListA"></div></div>
+          <div class="ch-col" style="--k:var(--c-b)"><div class="ch-h"><span class="ch-dot"></span>카톡<b id="chTotB"></b></div><div id="chListB"></div></div>
+        </div>
+      </div>
+      <div class="lg-main">
+        <div class="card lg-tbl">
+          <div class="table-wrap">
+            <table>
+              <colgroup><col style="width:186px"><col style="width:80px"><col style="width:72px">
+                <col><col style="width:84px"></colgroup>
+              <thead><tr><th>날짜</th><th class="n"><span class="sw" style="background:var(--c-a)"></span>초진콜</th>
+                <th class="n"><span class="sw" style="background:var(--c-b)"></span>카톡</th>
+                <th class="n"><span class="sw" style="background:var(--c-c)"></span>합계</th>
+                <th class="n">전일 대비</th></tr></thead>
+              <tbody id="lgRows"><tr><td colspan="5" class="empty">불러오는 중…</td></tr></tbody>
+              <tfoot id="lgFoot"></tfoot>
+            </table>
+          </div>
+        </div>
+        <!-- 기간 비교: 빠른 선택 또는 날짜 직접 선택 -->
+        <div class="card lg-cmp">
+          <div class="cmp-h"><b>기간 비교</b><span class="lg-sub">기록된 날 기준</span></div>
+          <div class="cmp-presets" id="cmpPresets">
+            <button type="button" data-p="day">오늘 / 어제</button>
+            <button type="button" data-p="week">이번 주 / 지난 주</button>
+            <button type="button" data-p="d7">최근 7일 / 이전 7일</button>
+            <button type="button" data-p="month">이번 달 / 지난 달</button>
+          </div>
+          <div class="cmp-range a">
+            <span class="cmp-tag">A</span>
+            <span class="dp" role="button" tabindex="0"><span class="dp-t"></span><input type="date" id="cmpAs"></span><span class="til">~</span><span class="dp" role="button" tabindex="0"><span class="dp-t"></span><input type="date" id="cmpAe"></span>
+          </div>
+          <div class="cmp-range b">
+            <span class="cmp-tag">B</span>
+            <span class="dp" role="button" tabindex="0"><span class="dp-t"></span><input type="date" id="cmpBs"></span><span class="til">~</span><span class="dp" role="button" tabindex="0"><span class="dp-t"></span><input type="date" id="cmpBe"></span>
+          </div>
+          <div class="cmp-body" id="cmpBody"></div>
+        </div>
+      </div>
+    </div>
+    <div id="viewLive">
+    <!-- 금일 현황: TODAY 시트 A3:J6 (읽기 전용). 채널 타일보다 위 -->
+    <section id="todaySec" hidden>
+      <div class="card">
+        <div class="today-head" id="todayHead"><h2>금일 현황</h2><span class="date" id="todayDate"></span>
+          <span class="today-total" id="todayTotal" hidden>TOTAL</span></div>
+        <div class="today-grid" id="todayGrid"></div>
+      </div>
+    </section>
+    <section class="tiles" id="tiles"></section>
+    <div class="sec-h"><h2>미확인 상세</h2><span class="cnt" id="detailCnt"></span></div>
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>채널</th><th>이름</th><th>내용</th><th>시각</th><th>연락처</th><th></th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+    </div><!-- /viewLive -->
+  </div>
+  <div class="tip" id="tip" hidden></div>
+  <script>
+    const CH = {
+      "강남언니": "#EC4899", "바비톡": "#8B5CF6", "여신티켓": "#FF4757",
+      "네이버지도": "#03C75A",
+      "온라인상담": "#1E90FF", "온라인예약": "#FF9500", "카카오톡": "#E0AC00",
+      "인스타_잠재고객": "#C13584"
+    };
+    const URLS = {
+      "강남언니":   "https://partner.gangnamunni.com/consultation",
+      "바비톡":     "https://client.babitalk.com/ask",
+      "여신티켓":   "https://plus.yeoshin.co.kr/customerManagement/consultations",
+      "네이버지도": "https://partner.booking.naver.com/bizes/762603/booking-list-view",
+      "온라인상담": "https://www.byulstar.com/manager/main/counsel/counsel_list.php",
+      "온라인예약": "https://www.byulstar.com/manager/online/list.php",
+      "카카오톡":   "https://business.kakao.com/_hxlKxcxd/chats",
+      "인스타_잠재고객": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_ID/edit?gid=724072772#gid=724072772"
+    };
+    // 채널 안에서 '종류'가 갈리는 항목. 수집기(total.py)가 '내용' 앞에 표식을 붙여 보내고
+    // 여기서 표식을 떼어 꼬리표 + 전용 바로가기로 바꾼다.
+    // → 시트 열 구조(채널·이름·내용·시각·연락처)를 안 바꿔도 되므로 Code.gs 는 그대로.
+    const SUBKINDS = [
+      { mark: "[Q&A] ", tag: "Q&A", channel: "강남언니", base: "상담",
+        url: "https://partner.gangnamunni.com/service-offer/qna" },
+      { mark: "[채팅] ", tag: "채팅", channel: "강남언니", base: "상담",
+        url: "https://partner.gangnamunni.com/chats-new" },
+      { mark: "[예약] ", tag: "예약", channel: "카카오톡", base: "채팅",
+        url: "https://business.kakao.com/booking/redirect?partnerId=319756&redirectUri=%2Freservation" }
+    ];
+    const subkindOf = r => SUBKINDS.find(
+      k => k.channel === r[0] && String(r[2] || "").startsWith(k.mark)) || null;
+    // 채널별 대표 아이콘 (인라인 SVG · 외부 이미지 의존 없음)
+    const ICO = {
+      "강남언니":   '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/>',
+      "바비톡":     '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
+      "여신티켓":   '<path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 11v2"/><path d="M13 17v2"/>',
+      "네이버지도": '<path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/>',
+      "온라인상담": '<path d="M3 11h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H4a1 1 0 0 1-1-1v-6a9 9 0 0 1 18 0v6a1 1 0 0 1-1 1h-2a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/>',
+      "온라인예약": '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="m9 16 2 2 4-4"/>',
+      "카카오톡":   '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+      "인스타_잠재고객": '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>'
+    };
+    const icon = name =>
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+      'stroke-linecap="round" stroke-linejoin="round">' +
+      (ICO[name] || '<circle cx="12" cy="12" r="9"/>') + '</svg>';
+
+    const esc = s => (s == null ? "" : String(s))
+      .replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" }[c]));
+    const DOWK = ["일", "월", "화", "수", "목", "금", "토"];
+    const pad = n => String(n).padStart(2, "0");
+    const fmtTime = s => {
+      if (s instanceof Date) {
+        return s.getFullYear() + "-" + pad(s.getMonth() + 1) + "-" + pad(s.getDate()) +
+          " (" + DOWK[s.getDay()] + ") " + pad(s.getHours()) + ":" + pad(s.getMinutes());
+      }
+      s = (s == null ? "" : String(s)).trim();
+      // 시:분은 없을 수도 있다(강남언니 Q&A 작성일은 날짜만 온다) → 있으면만 붙인다
+      const m = s.match(/(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/);
+      if (!m) return s;
+      const dow = DOWK[new Date(+m[1], +m[2] - 1, +m[3]).getDay()];
+      return m[1] + "-" + m[2] + "-" + m[3] + " (" + dow + ")" +
+        (m[4] ? " " + pad(m[4]) + ":" + m[5] : "");
+    };
+    const sortTime = s => {
+      if (s instanceof Date) return s.getTime();
+      const m = (s == null ? "" : String(s)).match(/(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/);
+      return m ? new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0)).getTime() : 0;
+    };
+    const ALIVE_MIN = 12;
+    // 수집기 하트비트가 이 분수를 넘으면 '중지됨'으로 본다
+    // (total.py 의 SHEET_LOCK_STALE_SEC = 420초 와 맞춤)
+    const COLLECTOR_STALE_MIN = 7;
+    const minsAgo = updated => {
+      const m = String(updated || "").match(/(\d{4})-(\d{2})-(\d{2}).*?(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+      if (!m) return null;
+      const t = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)).getTime();
+      return Math.max(0, Math.round((Date.now() - t) / 60000));
+    };
+    // 경과 분 → 'n일 n시간 n분' (0인 단위는 생략, 0분이면 '방금')
+    const fmtAgo = mins => {
+      if (mins == null) return "";
+      if (mins <= 0) return "방금";
+      const d = Math.floor(mins / 1440);
+      const h = Math.floor((mins % 1440) / 60);
+      const m = mins % 60;
+      const p = [];
+      if (d) p.push(d + "일");
+      if (h) p.push(h + "시간");
+      if (m || !p.length) p.push(m + "분");
+      return p.join(" ");
+    };
+
+    // ════════════════════════════════════════════════════════════
+    //  알람 (Web Audio · 외부 파일 없이 생성)
+    // ════════════════════════════════════════════════════════════
+    let audioCtx = null, beepTimer = null, audioUnlocked = false;
+    let ackLevel = 0;      // 사용자가 마지막으로 '알람 끄기' 한 시점의 미확인 건수
+    let ringing = false;   // 현재 소리가 울려야 하는 상태인지
+    let nextBeepAt = 0;    // 다음 비프를 예약한 오디오시각(초) — 백그라운드 대비 선예약
+    const BEEP_GAP = 3;    // 비프 간격(초)
+    const BEEP_AHEAD = 30; // 미리 예약해 둘 길이(초). 숨은 탭 타이머 지연 대비
+
+    // ── 알람 허용 시간대 (한국시각 KST 기준) ─────────────────
+    // 이 시간 밖(야간)에는 미확인이 쌓여도 소리를 내지 않는다.
+    // 화면 표시·탭 제목·붉은 강조는 그대로 유지되고 '소리'만 죽인다.
+    // PC 표준시간대가 한국이 아니어도 항상 KST(UTC+9)로 판정한다.
+    const ALARM_FROM = 8 * 60 + 30;    // 08:30 (KST)
+    const ALARM_TO   = 19 * 60 + 30;   // 19:30 (KST)
+    const KST_OFFSET = 9 * 60;         // UTC+9
+    const hhmm = m => pad(Math.floor(m / 60)) + ":" + pad(m % 60);
+    // 지금이 KST 로 몇 시 몇 분인지(자정부터의 분)
+    const kstMinutes = () => {
+      const d = new Date();
+      return (d.getUTCHours() * 60 + d.getUTCMinutes() + KST_OFFSET) % 1440;
+    };
+    function inAlarmWindow() {
+      const m = kstMinutes();
+      // FROM < TO 면 같은 날 구간, FROM > TO 면 자정을 넘는 구간으로 처리
+      return ALARM_FROM <= ALARM_TO
+        ? (m >= ALARM_FROM && m < ALARM_TO)
+        : (m >= ALARM_FROM || m < ALARM_TO);
+    }
+
+    let masterGain = null;   // 모든 비프가 지나가는 볼륨 노드(끌 때 즉시 음소거용)
+    function unlockAudio() {                       // 첫 사용자 제스처에서 오디오 활성화
+      try {
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          masterGain = audioCtx.createGain();
+          masterGain.gain.value = 1;
+          masterGain.connect(audioCtx.destination);
+        }
+        if (audioCtx.state === "suspended") audioCtx.resume();
+        audioUnlocked = true;
+        if (ringing) startBeep();                 // 이미 울릴 상태면 바로 재생
+      } catch (e) { /* 오디오 미지원 환경 무시 */ }
+    }
+    // 어떤 상호작용이든 오디오 잠금 해제(브라우저 자동재생 정책상 1회 제스처 필요)
+    ["pointerdown", "keydown", "touchstart"].forEach(ev =>
+      document.addEventListener(ev, unlockAudio, { passive: true }));
+
+    // 절대 오디오시각 t 에 '딩-동' 2음을 예약(오디오 스레드가 정확히 재생 → 백그라운드에도 울림)
+    function beepAt(t) {
+      [880, 1174].forEach((freq, i) => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "sine"; osc.frequency.value = freq;
+        const start = t + i * 0.2;
+        gain.gain.setValueAtTime(0, start);
+        gain.gain.linearRampToValueAtTime(0.25, start + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0008, start + 0.28);
+        osc.connect(gain).connect(masterGain);    // 마스터 노드 경유(끌 때 즉시 음소거)
+        osc.start(start); osc.stop(start + 0.3);
+      });
+    }
+    // 지금부터 BEEP_AHEAD 초까지의 비프를 한꺼번에 예약(부족분만 채움)
+    function scheduleBeeps() {
+      if (!audioCtx || !ringing) return;
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      const now = audioCtx.currentTime;
+      if (nextBeepAt < now) nextBeepAt = now + 0.05;
+      while (nextBeepAt < now + BEEP_AHEAD) {
+        beepAt(nextBeepAt);
+        nextBeepAt += BEEP_GAP;
+      }
+    }
+    function startBeep() {
+      if (!audioUnlocked) return;
+      if (masterGain) masterGain.gain.value = 1;    // 음소거 해제
+      nextBeepAt = 0;
+      scheduleBeeps();                              // 즉시 선예약(백그라운드여도 울리기 시작)
+      if (!beepTimer) beepTimer = setInterval(scheduleBeeps, 10000);  // 10초마다 보충
+    }
+    function stopBeep() {
+      if (beepTimer) { clearInterval(beepTimer); beepTimer = null; }
+      nextBeepAt = 0;
+      // 이미 예약된(최대 30초치) 비프를 즉시 음소거 — 끈 뒤에도 울리는 것 방지
+      if (masterGain && audioCtx) {
+        masterGain.gain.cancelScheduledValues(audioCtx.currentTime);
+        masterGain.gain.setValueAtTime(0, audioCtx.currentTime);
+      }
+    }
+
+    // total(미확인 합계)에 따라 알람 상태 갱신
+    function updateAlarm(total) {
+      const bell = document.getElementById("bell");
+      const txt = document.getElementById("bellTxt");
+      if (total <= 0) {                            // 전부 확인됨 → 알람 해제
+        ackLevel = 0; ringing = false; stopBeep();
+        bell.hidden = true; bell.className = "bell";
+        return;
+      }
+      bell.hidden = false;
+      // 미확인이 '지난 확인 시점보다 늘었으면' 다시 울림(새 상담 유입).
+      // 단, 알람 허용 시간대(08:30~19:30) 밖이면 울리지 않는다.
+      const quiet = !inAlarmWindow();
+      ringing = !quiet && total > ackLevel;
+      if (ringing) {
+        bell.className = "bell ringing";
+        txt.textContent = "알람 끄기 (" + total + "건) · F4";
+        bell.title = "알람 끄기 (단축키 F4)";
+        startBeep();
+      } else if (quiet) {
+        bell.className = "bell muted";
+        txt.textContent = "알람 시간 아님 (" + total + "건)";
+        bell.title = "알람은 한국시각 " + hhmm(ALARM_FROM) + "~" + hhmm(ALARM_TO) + " 에만 울립니다";
+        stopBeep();
+      } else {
+        bell.className = "bell muted";
+        txt.textContent = "알람 꺼짐 (" + total + "건)";
+        bell.title = "알람 끄기 (단축키 F4)";
+        stopBeep();
+      }
+    }
+    // 알람 잠재우기(=현재 미확인 건수를 '확인함'으로 기록). 벨 클릭 / F4 공용.
+    function ackAlarm() {
+      const bell = document.getElementById("bell");
+      if (bell.hidden) return;                 // 울릴 것이 없으면 무시
+      const total = parseInt(document.getElementById("total").textContent) || 0;
+      ackLevel = total;          // 이보다 더 늘어나기 전까지 조용
+      ringing = false; stopBeep();
+      bell.className = "bell muted";
+      document.getElementById("bellTxt").textContent = "알람 꺼짐 (" + total + "건)";
+    }
+    document.getElementById("bell").addEventListener("click", ackAlarm);
+
+    // F4 = 알람 끄기 단축키. 페이지를 한 번 클릭해 포커스가 있어야 동작한다.
+    document.addEventListener("keydown", e => {
+      if (e.key === "F4" && !e.altKey) {       // Alt+F4(창 닫기)는 건드리지 않음
+        e.preventDefault();
+        ackAlarm();
+      }
+    });
+
+    // ── 백지 방지 ───────────────────────────────────────────────
+    // 수집기는 대시보드 탭을 '① 전부 지우고 → ② 요약 쓰고 → ③ 상세 쓰기'
+    // 세 번의 API 호출로 갱신한다. 그 1~2초 사이에 읽으면
+    //   ① ~ ② 사이 → 요약도 상세도 비어 옴  (화면 전체가 백지)
+    //   ② ~ ③ 사이 → 요약만 있고 상세가 비어 옴 (미확인 상세만 백지)
+    // 게다가 Code.gs 가 8초 캐시를 하므로 그 상태가 몇 초 더 남는다.
+    // → '읽는 순간이 나빴던 것'으로 보고 직전 화면을 그대로 둔다.
+    //   (한 번도 못 그린 첫 로드는 그대로 그린다 — 빈 화면이라도 보여야 하므로)
+    let rendered = false;
+    function looksPartial(data) {
+      const chs = (data && data.channels) || [];
+      if (!chs.length) return true;                  // ① 지우는 중에 읽음
+      const items = (data && data.items) || [];
+      const total = chs.reduce((s, c) => s + (parseInt(c.count) || 0), 0);
+      return total > 0 && !items.length;             // ② 요약만 쓰인 상태
+    }
+
+    function render(data) {
+      if (rendered && looksPartial(data)) return;    // 직전 화면 유지
+      // 스탬프는 '2026-07-21 (화) 15:25:58 업데이트 완료 · YSG' 형태.
+      // 뒤의 PC 이름을 떼어 별도 배지로 보여준다(어느 PC가 수집 중인지 구분).
+      const raw = String(data.updated || "");
+      const sep = raw.lastIndexOf(" · ");
+      const host = sep > -1 ? raw.slice(sep + 3).trim() : "";
+      document.getElementById("ts").textContent = sep > -1 ? raw.slice(0, sep) : raw;
+
+      // 수집기 동작 여부: 시트 H1(소유 PC)·H2(하트비트)로 판정.
+      // 수집기는 매 사이클(3분) 하트비트를 갱신하므로, STALE 을 넘으면 멈춘 것.
+      // GUI 를 닫으면 수집기도 따라 종료되므로 사실상 'GUI 켜짐'과 같다.
+      const lockHost = String(data.lockOwner || "").split("|")[0].trim();
+      const beatMins = minsAgo(data.lockBeat);
+      const running = !!lockHost && beatMins != null && beatMins <= COLLECTOR_STALE_MIN;
+      const shownHost = lockHost || host;
+
+      const hostEl = document.getElementById("host");
+      hostEl.hidden = !shownHost;
+      hostEl.className = "host " + (running ? "on" : "off");
+      // 멈춘 경우 얼마나 됐는지 'n일 n시간 n분' 으로 함께 표시
+      hostEl.textContent = shownHost +
+        (running ? " · 수집 중"
+                 : (beatMins == null ? " · 중지됨" : " · 중지됨 " + fmtAgo(beatMins) + " 전"));
+      hostEl.title = running
+        ? `${shownHost} 에서 수집기가 실행 중입니다 (하트비트 ${fmtAgo(beatMins)} 전)`
+        : (beatMins == null
+            ? "수집기가 실행 중이 아닙니다"
+            : `수집기가 멈춘 것으로 보입니다 (마지막 하트비트 ${fmtAgo(beatMins)} 전)`);
+
+      // 실행 중인 코드 버전(시트 H3). '(개발)' 이면 소스 직접 실행 = 자동 업데이트 대상 아님.
+      const ver = String(data.version || "").trim();
+      const verEl = document.getElementById("ver");
+      const dev = /\(개발\)/.test(ver);
+      verEl.hidden = !ver;
+      verEl.className = "ver" + (dev ? " dev" : "");
+      verEl.textContent = "v" + ver.replace(/^v/, "");
+      verEl.title = dev
+        ? `소스를 직접 실행 중입니다(자동 업데이트 대상 아님) · 마지막 배포 v${ver.replace(/\(개발\)/, "")}`
+        : `이 PC 가 실행 중인 코드 버전 v${ver}\n(exe 를 다시 실행하면 최신 버전으로 자동 업데이트됩니다)`;
+
+      // 오른쪽: 채널별 최종 업데이트 시각(각 시트 A1). Code.gs 가 channelTimes 로 넘김.
+      const ctEl = document.getElementById("chtimes");
+      const ctList = data.channelTimes || [];
+      if (ctList.length) {
+        ctEl.hidden = false;
+        ctEl.innerHTML = ctList.map(c => {
+          const a = minsAgo(c.updated);
+          const ago = a == null ? "기록 없음" : fmtAgo(a) + " 전";
+          const stale = a != null && a > COLLECTOR_STALE_MIN;   // 7분 넘으면 붉게
+          return '<div class="ct-item' + (stale ? " stale" : "") + '">' +
+            '<span class="ct-name">' + esc(c.name) + '</span>' +
+            '<span class="ct-ago">' + esc(ago) + '</span></div>';
+        }).join("");
+      } else {
+        ctEl.hidden = true;
+      }
+
+      const mins = minsAgo(data.updated);
+      const st = document.getElementById("status");
+
+      // 실패 채널은 count 가 숫자가 아니라 사유 문자열('로그인 실패' 등).
+      // 집계에서 0으로 묻히므로 따로 센다. note 에는 예외 원문이 들어온다.
+      const chs = data.channels || [];
+      const failedChs = chs.filter(c => isNaN(parseInt(c.count)));
+      const nFail = failedChs.length;
+
+      st.title = nFail
+        ? failedChs.map(c => c.name + ": " + c.count + (c.note ? "\n   " + c.note : "")).join("\n")
+        : "";
+      if (mins == null) { st.className = "status"; st.textContent = ""; }
+      else if (mins > ALIVE_MIN) { st.className = "status dead"; st.textContent = "🔴 중단됨 · " + fmtAgo(mins) + " 전"; }
+      else if (nFail) {
+        const kinds = [...new Set(failedChs.map(c => c.count))].join(" / ");
+        st.className = "status warn";
+        st.textContent = "🟠 " + kinds + " " + nFail + "/" + chs.length + " · " + fmtAgo(mins) + " 전";
+      }
+      else { st.className = "status live"; st.textContent = "🟢 작동 중 · " + fmtAgo(mins) + " 전"; }
+
+      const total = chs.reduce((s, c) => s + (parseInt(c.count) || 0), 0);
+      document.getElementById("total").textContent = total;
+      // 탭 제목에 미확인 건수 표시(백그라운드 탭에서도 눈으로 확인 가능)
+      document.title = (total > 0 ? "🔴(" + total + ") " : "") + "상담 통합 대시보드";
+      // 실패가 있으면 미확인 0건이어도 '정상(초록)'으로 보이지 않게 한다
+      document.getElementById("totalBox").classList.toggle("ok", total === 0 && !nFail);
+      updateAlarm(total);        // ← 알람 판정
+
+      // 채널별 종류 내역: {강남언니: {kind, n}} — 타일 숫자(=합계)의 구성 표시용.
+      // 상세 목록에서 세므로 시트에 열/행을 더할 필요가 없다.
+      const breakdown = {};
+      (data.items || []).forEach(r => {
+        const k = subkindOf(r);
+        if (!k) return;
+        // 한 채널에 종류가 둘 이상일 수 있다(강남언니 = 상담 + Q&A + 채팅)
+        const b = breakdown[r[0]] || (breakdown[r[0]] = { base: k.base, tags: {}, n: 0 });
+        b.tags[k.tag] = (b.tags[k.tag] || 0) + 1;
+        b.n++;
+      });
+
+      document.getElementById("tiles").innerHTML = (data.channels || []).map(c => {
+        const color = CH[c.name] || "#888";
+        const url = URLS[c.name] || "#";
+        const failed = isNaN(parseInt(c.count));      // 숫자 아님 → count 가 곧 실패 사유
+        const num = failed ? 0 : parseInt(c.count);
+        const active = num > 0;
+        // 실패 시 note 는 예외 원문이라 잔액 밑에 붙이지 않고 타일 툴팁으로 뺀다
+        const bal = c.balance
+          ? '<div class="bal">잔액 <span class="b">' + esc(c.balance) + '</span>' +
+            (c.note && !failed ? '<span class="note">' + esc(c.note) + '</span>' : '') + '</div>'
+          : '';
+        // 종류가 섞인 채널(강남언니 = 상담 + Q&A)은 합계 대신 내역으로 보여준다
+        const bk = breakdown[c.name];
+        const sub = bk
+          ? '<span class="brk">' + esc(bk.base) + " " + (num - bk.n) +
+            Object.keys(bk.tags).map(t => " · " + esc(t) + " " + bk.tags[t]).join("") +
+            '</span>'
+          : "미확인 상담";
+        const body = failed
+          ? '<div class="num">!</div><div class="sub">' + esc(c.count || "수집 실패") + '</div>' +
+            '<div class="flag err">⚠️ 확인 필요</div>'
+          : '<div class="num">' + num + '</div><div class="sub">' + sub + '</div>' +
+            '<div class="flag">확인 필요</div>';
+        const cls = failed ? "failed" : (active ? "active" : "zero");
+        const tip = failed && c.note ? ' title="' + esc(c.note) + '"' : '';
+        return '<div class="tile ' + cls + '" style="--ch:' + color + '"' + tip + '>' +
+          '<div class="thead"><span class="ico">' + icon(c.name) + '</span>' +
+          '<span class="cname">' + esc(c.name) + '</span></div>' +
+          body + bal +
+          '<a class="go" href="' + esc(url) + '" target="_blank" rel="noopener">바로가기 ↗</a>' +
+        '</div>';
+      }).join("");
+
+      // 카카오톡 채팅(상대시각) 최상단 → 나머지 최신순
+      // (카카오 예약은 신청일시가 실제 날짜라 다른 채널과 같이 시간순으로 섞는다)
+      const sk = r => r[0] === "카카오톡" && !subkindOf(r) ? 9e15 : sortTime(r[3]);
+      const items = (data.items || []).slice().sort((a, b) => sk(b) - sk(a));
+      document.getElementById("detailCnt").textContent = items.length + "건";
+      document.getElementById("rows").innerHTML = items.length ? items.map(r => {
+        const color = CH[r[0]] || "#888";
+        const kind = subkindOf(r);                       // 강남언니 Q&A 등
+        const url = (kind && kind.url) || URLS[r[0]] || "#";
+        const text = kind ? String(r[2]).slice(kind.mark.length) : r[2];
+        return '<tr>' +
+          '<td><span class="chip" style="--ch:' + color + '"><span class="cico">' + icon(r[0]) + '</span>' + esc(r[0]) + '</span>' +
+            (kind ? '<span class="tag">' + esc(kind.tag) + '</span>' : '') + '</td>' +
+          '<td class="nm"><span class="nm-t" title="' + esc(r[1]) + '">' + esc(r[1]) + '</span></td>' +
+          '<td class="ct">' + esc(text) + '</td>' +
+          '<td class="tm">' + esc(fmtTime(r[3])) + '</td>' +
+          '<td class="ph">' + (esc(r[4]) || "—") + '</td>' +
+          '<td class="go-cell"><a class="go" href="' + esc(url) + '" target="_blank" rel="noopener">바로가기 ↗</a></td>' +
+        '</tr>';
+      }).join("") : '<tr><td colspan="6" class="empty">미확인 상담이 없습니다 ✓</td></tr>';
+
+      renderToday(data.today, data.todayDetails);
+      rendered = true;
+    }
+
+    // ── 금일 현황 ────────────────────────────────────────────────
+    // Code.gs 는 시트 모양(병합 포함)을 그대로 넘긴다. 여기서 '라벨 줄 + 숫자 줄'을
+    // 열 위치로 짝지어 지표로 되돌린 뒤, 모든 값을 같은 폭의 열 하나씩으로 편다.
+    const isNumCell = t => /^-?[\d,]+(\.\d+)?%?$/.test(t);
+    const numOf = t => parseFloat(String(t).replace(/,/g, "")) || 0;
+    // 지표 이름 → 아래 채널 타일과 같은 색을 쓰기 위한 별칭
+    const TODAY_ALIAS = { "카톡": "카카오톡", "온상": "온라인상담", "온·예약": "온라인예약" };
+    // ── 화면 표기 ─────────────────────────────────────────────────
+    // 시트 라벨('금일 ' 은 뗀 이름) → 그 라벨이 덮는 숫자들을 각각 어떤 이름으로 보여줄지.
+    // note 는 숫자 뒤에 붙는 파란 꼬리표. 시트를 고치지 않고 여기서만 바꾼다.
+    // ※ 항목 수가 시트의 숫자 개수와 다르면 무시하고 시트 라벨을 그대로 쓴다.
+    // 시트에선 라벨이 따로여도 화면에선 한 세트로 묶을 항목(안쪽 구분선을 지운다)
+    const TODAY_GROUPS = [["신규", "초진"]];
+    // 금일 현황 헤더의 요일별 테마. DOWK 순서(일·월·화·수·목·금·토)와 맞춘다.
+    // from = 글씨가 놓이는 왼쪽 색이라 대비는 이 색 기준. 노랑만 어두운 글씨를 쓴다.
+    const DOW_THEME = [
+      { from: "#be185d", to: "#f472b6", fg: "#fff" },      // 일 · 분홍
+      { from: "#b91c1c", to: "#f87171", fg: "#fff" },      // 월 · 빨강
+      { from: "#9a3412", to: "#fb923c", fg: "#fff" },      // 화 · 주황
+      { from: "#f59e0b", to: "#fde68a", fg: "#3f2d00" },   // 수 · 노랑
+      { from: "#15803d", to: "#4ade80", fg: "#fff" },      // 목 · 초록
+      { from: "#1d4ed8", to: "#60a5fa", fg: "#fff" },      // 금 · 파랑
+      { from: "#6d28d9", to: "#c084fc", fg: "#fff" }       // 토 · 보라
+    ];
+    // 연노랑 배경으로 강조할 세트(시트 라벨 기준)
+    const TODAY_HILITE = ["신규 / 초진"];
+    // 연노랑 배경으로 표시할 칸(화면 표기 이름 기준)
+    const TODAY_MARK = ["초진콜", "카톡예약"];
+    // 클릭하면 명단이 뜨는 칸. Code.gs 의 TODAY_DETAILS 키와 같아야 한다.
+    // ※ 데이터가 안 와도(=Code.gs 가 옛 버전) 눌리게 두어야 이유를 화면에서 알 수 있다.
+    const TODAY_DETAIL_KEYS = ["초진콜", "카톡예약", "초진"];
+    // 열 이름 앞 아이콘. 아래 채널 타일과 같은 선 굵기·모양을 쓴다.
+    const TODAY_ICO = {
+      // 예약 확정 = 달력에 체크(온라인예약 타일과 같은 도형)
+      "예약": '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/>' +
+              '<path d="M3 10h18"/><path d="m9 16 2 2 4-4"/>'
+    };
+    const tIcon = k => TODAY_ICO[k]
+      ? '<svg class="tico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" ' +
+        'stroke-linecap="round" stroke-linejoin="round">' + TODAY_ICO[k] + '</svg>'
+      : "";
+    const TODAY_COLS = {
+      "신규": [{ name: "신규콜" }],
+      "초진": [{ name: "초진콜", note: "실 예약" }],
+      "카톡": [{ name: "카톡문의" }, { name: "카톡예약", note: "실 예약" }],
+      // hero = 실제 예약 수. 가장 중요한 한 칸이라 화면에서 한 단계 더 띄운다.
+      "신규 / 초진": [{ name: "신규" },
+                     { name: "초진", note: "실 예약", hero: true, ico: "예약" }]
+    };
+
+    function todayMetrics(rows) {
+      // colspan 을 누적해 각 칸의 원래 열 번호(c)를 복원한다
+      const laid = rows.map(cells => {
+        let c = 0;
+        return cells.map(x => { const o = { t: x.t, cs: x.cs, c: c }; c += x.cs; return o; });
+      });
+      const isValRow = cells =>
+        cells.some(x => isNumCell(x.t)) && cells.every(x => !x.t || isNumCell(x.t));
+      const lab = [], val = [];
+      laid.forEach(cells => (isValRow(cells) ? val : lab).push(cells));
+      if (!lab.length || !val.length) return null;
+
+      // 비교 줄의 접두어('어제 신규' → '어제'). 없으면 비교 표시를 생략한다.
+      const prevTag = ((lab[1] || []).find(x => x.t) || { t: "" }).t.split(/\s+/)[0] || "";
+
+      const groupKey = l => {
+        const g = TODAY_GROUPS.find(a => a.indexOf(l) > -1);
+        return g ? g.join("|") : l;
+      };
+      const cols = [];
+      let lastKey = null;
+      lab[0].filter(x => x.t).forEach(h => {
+        // 라벨이 덮는 열 구간의 숫자 칸을 모은다('금일 카톡'(E:F) → 값 두 개)
+        const inSpan = row => row.filter(v => v.c >= h.c && v.c < h.c + h.cs);
+        const now = inSpan(val[0]), prev = val[1] ? inSpan(val[1]) : [];
+        if (!now.length) return;
+
+        const label = h.t.replace(/^(금일|오늘)\s*/, "").trim();
+        const spec = TODAY_COLS[label];
+        // 표기 설정이 없으면 '신규 / 초진' 처럼 '/' 로 갈라 쓰고, 그것도 안 되면 라벨 그대로
+        const parts = label.split("/").map(x => x.trim()).filter(Boolean);
+        const color = CH[TODAY_ALIAS[label] || label] || "";
+
+        const key = groupKey(label);
+        now.forEach((v, k) => {
+          const nm = (spec && spec.length === now.length && spec[k].name) ||
+                     (now.length > 1 && parts.length === now.length ? parts[k] : label);
+          cols.push({
+            name: nm,
+            note: (spec && spec.length === now.length && spec[k].note) || "",
+            color: color,
+            gsub: k > 0 || key === lastKey,    // 세트 안쪽 칸 → 세로 구분선 없음
+            hl: TODAY_HILITE.indexOf(label) > -1,
+            mark: TODAY_MARK.indexOf(nm) > -1,
+            hero: !!(spec && spec.length === now.length && spec[k].hero),
+            ico: (spec && spec.length === now.length && spec[k].ico) || "",
+            now: v.t,
+            prev: prev[k] ? prev[k].t : ""
+          });
+        });
+        lastKey = key;
+      });
+      return { prevTag: prevTag, cols: cols };
+    }
+
+    // ── 칸 마우스오버 명단 ──────────────────────────────────────
+    // Code.gs 가 TODAY 문서의 다른 시트(초진콜·카톡·실예약)에서 조건에 맞는
+    // 행만 뽑아 보낸다. 키는 화면 표기 이름(초진콜·카톡예약·초진)과 같다.
+    let todayDet = {};
+    let tipKey = "";                    // 지금 열려 있는 칸(없으면 "")
+    let tipAnchor = null;               // 그 칸의 요소(스크롤 때 따라가려고 기억)
+    const tipEl = document.getElementById("tip");
+    function hideTip() {
+      tipEl.hidden = true;
+      tipKey = "";
+      tipAnchor = null;
+      document.querySelectorAll(".tcol.open").forEach(e => e.classList.remove("open"));
+    }
+
+    /** 명단을 기준 칸 바로 아래(페이지 좌표)에 놓는다.
+        absolute 라 한 번만 잡아 두면 스크롤해도 칸을 따라 같이 움직인다. */
+    function placeTip() {
+      if (tipEl.hidden || !tipAnchor) return;
+      const r = tipAnchor.getBoundingClientRect();
+      const t = tipEl.getBoundingClientRect();
+      // 오른쪽으로 넘치면 화면 안으로 당긴다(문서 좌표 = 화면좌표 + 스크롤량)
+      const left = Math.min(Math.max(8, r.left), Math.max(8, innerWidth - t.width - 8));
+      tipEl.style.left = Math.round(left + scrollX) + "px";
+      tipEl.style.top = Math.round(r.bottom + 8 + scrollY) + "px";
+    }
+    function showTip(el, key) {
+      const d = todayDet[key];
+      const rows = (d && d.rows) || [];
+      // total = 조건에 맞는 전체 건수(rows 는 상한까지만 넘어온다)
+      const total = (d && typeof d.total === "number") ? d.total : rows.length;
+      let html = '<div class="tip-h"><span>' + esc(key) + '</span>' +
+        (d && !d.error ? ' <span class="n">' + total + '건</span>' : '') +
+        '<button class="tip-x" type="button" title="닫기">×</button></div>';
+      if (!d) {
+        // Code.gs 가 todayDetails 를 안 보내는 상태 — 화면만 새로 붙이면 이렇게 된다.
+        html += '<div class="tip-msg">명단을 불러오지 못했습니다.<br>' +
+                'Apps Script 의 <b>Code.gs</b> 도 최신으로 붙여넣고 다시 배포했는지 ' +
+                '확인해 주세요.</div>';
+      }
+      else if (typeof d.total !== "number") {
+        // total 은 새 Code.gs 만 보낸다. 이게 없으면 옛 코드가 도는 중이라
+        // 조건(날짜·빈칸)이 예전 것이어서 목록이 통째로 어긋난다.
+        // 틀린 목록을 그럴듯하게 보여주느니 옛 버전임을 알린다.
+        html += '<div class="tip-msg">Apps Script 의 <b>Code.gs</b> 가 옛 버전입니다.' +
+                '<br><span style="font-size:11px">편집기에서 Code.gs 를 열고 ' +
+                '<b>TODAY_TZ</b> 로 검색해 보세요 — 없으면 최신 코드가 아닙니다.' +
+                '<br>붙여넣은 뒤 <b>배포 → 배포 관리 → 편집 → 버전: 새 버전</b> 까지 ' +
+                '해야 반영됩니다.</span></div>';
+      }
+      else if (d.error) html += '<div class="tip-msg">' + esc(d.error) + '</div>';
+      else if (!rows.length) {
+        // 0건이면 '왜 0건인지'를 같이 보여준다(시트를 몇 행 봤는지·무슨 날짜와
+        // 비교했는지·그 열의 첫 값). 조건이 어긋났을 때 바로 알아채려는 것.
+        let why = "해당하는 건이 없습니다";
+        if (d.today) {
+          why += '<br><span style="font-size:11px">기준일 ' + esc(d.today) +
+                 ' · ' + (d.scanned || 0) + '행 확인' +
+                 (d.sample ? ' · 첫 행 날짜칸 “' + esc(d.sample) + '”' : '') +
+                 '</span>';
+        }
+        html += '<div class="tip-msg">' + why + '</div>';
+      }
+      else {
+        html += '<table><thead><tr><th class="no">#</th>' +
+          (d.headers || []).map(h => '<th>' + esc(h) + '</th>').join('') +
+          '</tr></thead><tbody>' +
+          rows.map((r, i) => '<tr><td class="no">' + (i + 1) + '</td>' +
+                             r.map(x => '<td>' + esc(x) + '</td>').join('') +
+                             '</tr>').join('') +
+          '</tbody></table>';
+        if (total > rows.length) {
+          html += '<div class="tip-more">앞 ' + rows.length + '건만 표시 · 전체 ' +
+                  total + '건</div>';
+        }
+      }
+      tipEl.innerHTML = html;
+      tipEl.hidden = false;
+      tipKey = key;
+      document.querySelectorAll(".tcol.open").forEach(e => e.classList.remove("open"));
+      el.classList.add("open");
+      tipEl.querySelector(".tip-x").addEventListener("click", hideTip);
+      tipAnchor = el;
+      placeTip();
+    }
+    // 스크롤 이벤트는 듣지 않는다 — absolute 라 페이지와 함께 움직인다.
+    // (창 크기가 바뀌면 칸 위치가 달라지므로 그때만 다시 잡는다)
+    addEventListener("resize", placeTip);
+    // 바깥을 누르거나 Esc 로 닫기
+    document.addEventListener("click", e => {
+      if (tipEl.hidden) return;
+      if (e.target.closest("#tip") || e.target.closest(".tcol.hasdet")) return;
+      hideTip();
+    });
+    document.addEventListener("keydown", e => { if (e.key === "Escape") hideTip(); });
+
+    let todayShown = false;      // 금일 현황을 한 번이라도 제대로 그렸는지
+    let todayFP = "";            // 직전에 그린 내용의 지문(같으면 다시 안 그린다)
+    function renderToday(t, details) {
+      todayDet = details || {};
+      const sec = document.getElementById("todaySec");
+      const m = t && t.rows && t.rows.length ? todayMetrics(t.rows) : null;
+      if (!m || !m.cols.length) {
+        // TODAY 는 다른 문서라 일시적으로 못 읽는 일이 있다(캐시·권한·쿼터).
+        // 한 번이라도 제대로 그렸다면 그 화면을 그대로 두고, 첫 로드에서만 숨긴다.
+        if (!todayShown) sec.hidden = true;
+        return;
+      }
+      todayShown = true;
+      sec.hidden = false;
+      lgPatchToday(m.cols);                 // 초진기록 화면의 오늘 줄도 같은 숫자로
+      const title = t.title || "";
+      // 20초마다 폴링하는데 매번 다시 그리면, 명단을 읽는 도중에 칸이 새로 만들어져
+      // 마우스오버가 풀린다. 내용이 그대로면 건드리지 않는다.
+      const fp = JSON.stringify([title, m.cols, todayDet]);
+      if (fp === todayFP) return;
+      todayFP = fp;
+      hideTip();
+      document.getElementById("todayDate").textContent = title;
+
+      // 요일은 시트 날짜의 '(목)' 에서 읽는다. 없으면 오늘 날짜로 판정.
+      const dm = title.match(/\(([일월화수목금토])\)/);
+      const dow = dm ? DOWK.indexOf(dm[1]) : new Date().getDay();
+      const th = DOW_THEME[dow] || DOW_THEME[0];
+      const head = document.getElementById("todayHead");
+      head.style.setProperty("--th-from", th.from);
+      head.style.setProperty("--th-to", th.to);
+      head.style.setProperty("--th-fg", th.fg);
+
+      const grid = document.getElementById("todayGrid");
+      grid.style.setProperty("--cols", m.cols.length);   // 열 개수만큼 균등 분할
+
+      // 강조 세트가 차지하는 구간을 헤더에 그대로 옮겨 'TOTAL' 을 얹는다
+      const tt = document.getElementById("todayTotal");
+      const hi = m.cols.map((c, k) => c.hl ? k : -1).filter(k => k > -1);
+      tt.hidden = !hi.length;
+      if (hi.length) {
+        const n = m.cols.length;
+        head.style.setProperty("--hl-left", (hi[0] / n * 100) + "%");
+        head.style.setProperty("--hl-w", (hi.length / n * 100) + "%");
+      }
+      grid.innerHTML = m.cols.map(c => {
+        const n = numOf(c.now), p = numOf(c.prev);
+        // 어제 대비 진행률. 어제를 넘어서면 100% 에서 멈춘다(막대는 꽉 찬 상태로).
+        const pct = p > 0 ? Math.min(100, Math.round(n / p * 100)) : (n > 0 ? 100 : 0);
+        // 어제 대비 증감 개수. 비교할 어제 값이 없으면 배지를 달지 않는다.
+        const d = n - p;
+        const delta = c.prev
+          ? '<span class="tdelta ' + (d > 0 ? "up" : d < 0 ? "down" : "same") + '">' +
+            (d > 0 ? "+" + d : String(d)) + '</span>'
+          : '';
+        const foot = c.prev
+          ? '<div class="tbar"><i style="width:' + pct + '%"></i></div>' +
+            '<span class="tprev">' + esc(m.prevTag) + ' <b>' + esc(c.prev) + '</b></span>'
+          : '';
+        return '<div class="tcol' + (c.gsub ? " gsub" : "") + (c.hl ? " hl" : "") +
+            (c.mark ? " mark" : "") +
+            (TODAY_DETAIL_KEYS.indexOf(c.name) > -1 ? " hasdet" : "") +
+            (c.hero ? " hero" : "") + (c.ico ? " hasico" : "") + (n === 0 ? " zero" : "") +
+            '" data-det="' + esc(c.name) +
+            '" style="--ch:' + (c.color || "var(--accent)") + '">' +
+          '<div class="tlabel">' + tIcon(c.ico) +
+            '<span class="tname">' + esc(c.name) + '</span>' +
+            delta + '</div>' +
+          '<div class="tnumrow"><b class="tnum">' + esc(c.now || "—") + '</b>' +
+            (c.note ? '<span class="tnote">' + esc(c.note) + '</span>' : '') + '</div>' +
+          foot +
+        '</div>';
+      }).join("");
+
+      grid.querySelectorAll(".tcol.hasdet").forEach(function (el) {
+        el.addEventListener("click", function () {
+          const key = el.dataset.det;
+          if (tipKey === key) hideTip();      // 같은 칸을 또 누르면 닫는다
+          else showTip(el, key);
+        });
+      });
+    }
+
+    function setRefreshing(on) {
+      const b = document.getElementById("refreshBtn");
+      if (!b) return;
+      b.disabled = on;
+      b.classList.toggle("spinning", on);
+    }
+
+    // 요청 하나가 끝나기 전에 다음 폴링이 겹치면 Apps Script 실행이 쌓여
+    // 뒤로 갈수록 더 느려진다 → 진행 중이면 건너뛴다.
+    let inFlight = false;
+    // 응답이 이 시간을 넘기면 '응답 없음' 으로 표시한다.
+    // (계정 불일치·서드파티 쿠키 차단 때 google.script.run 은 성공도 실패도
+    //  알려주지 않고 그냥 멈춰 버린다 — 그때 '불러오는 중…' 에서 무한 대기한다)
+    const LOAD_TIMEOUT_MS = 25000;
+
+    function load() {
+      if (inFlight) return;                 // 이전 요청이 아직 안 끝났으면 스킵
+      inFlight = true;
+      setRefreshing(true);
+
+      const t0 = Date.now();
+      const watchdog = setTimeout(() => {
+        if (!inFlight) return;
+        inFlight = false;
+        setRefreshing(false);
+        document.getElementById("ts").textContent =
+          "응답 없음 (" + Math.round(LOAD_TIMEOUT_MS / 1000) + "초 초과) — 구글 계정·쿠키 설정을 확인하세요";
+      }, LOAD_TIMEOUT_MS);
+
+      const done = () => { clearTimeout(watchdog); inFlight = false; setRefreshing(false); };
+
+      google.script.run
+        .withSuccessHandler(d => {
+          done();
+          // 그리는 도중 오류가 나면 예전엔 화면이 '불러오는 중…' 에서 멈췄다.
+          try { render(d); }
+          catch (err) {
+            document.getElementById("ts").textContent = "표시 오류: " + ((err && err.message) || err);
+            console.error("render() 실패", err, d);
+          }
+        })
+        .withFailureHandler(e => {
+          done();
+          document.getElementById("ts").textContent = "불러오기 오류: " + ((e && e.message) || e);
+          console.error("getDashboard() 실패 (" + (Date.now() - t0) + "ms)", e);
+        })
+        .getDashboard();
+    }
+
+    // 새로고침 버튼: 알람을 다시 무장(ackLevel 초기화)하고 즉시 재조회.
+    // → 껐던 알람도 새로고침하면 미확인이 남아 있는 한 다시 울린다.
+    document.getElementById("refreshBtn").addEventListener("click", () => {
+      unlockAudio();
+      ackLevel = 0;
+      load();
+    });
+
+    // 고정 헤더가 실제로 상단에 '붙었을 때'만 그림자를 준다
+    (() => {
+      const hd = document.querySelector("header");
+      if (!hd) return;
+      const onScroll = () => hd.classList.toggle("stuck", hd.getBoundingClientRect().top <= 0);
+      addEventListener("scroll", onScroll, { passive: true });
+      addEventListener("resize", onScroll);
+      onScroll();
+    })();
+
+    // 페이지가 열리면 소리 잠금을 미리 풀어 둔다. 브라우저 자동재생 정책에 막히면
+    // 화면 아무 곳이나 한 번 클릭(또는 키 입력)하는 순간 위 리스너가 자동으로 풀어 준다.
+    unlockAudio();
+
+    // ── 초진기록 화면 ──────────────────────────────────────────
+    // '초진기록' 시트(A 날짜 · B 초진콜 · C 카톡 · D 합계)를 기간 단위로 보여준다.
+    // 하루 한 번 쌓이는 기록이라 폴링하지 않고, 탭을 열 때만 불러온다(1분 캐시).
+    // 날짜는 전부 'yyyy-MM-dd' 문자열로 다룬다(문자열 비교 = 날짜 비교).
+    const LG = { data: null, loading: false, at: 0, from: "", to: "", quick: "", cmp: "week",
+                 A: ["", ""], B: ["", ""] };
+    const kstToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }).format(new Date());
+    const dAdd = (d, n) => {
+      const t = new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8)) + n * 86400000);
+      return t.toISOString().slice(0, 10);
+    };
+    const dDiff = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
+    const dowOf = d => new Date(Date.parse(d)).getUTCDay();
+    const md = d => (+d.slice(5, 7)) + "/" + (+d.slice(8));
+    const fmtD = d => d + " (" + DOWK[dowOf(d)] + ")";              // 2026-11-13 (금)
+    const dwCls = d => { const w = dowOf(d); return w === 6 ? "sat" : w === 0 ? "sun" : ""; };
+    const fmtDH = d => d + ' <span class="dw ' + dwCls(d) + '">(' + DOWK[dowOf(d)] + ')</span>';
+    const fmtR = r => r[0] === r[1] ? fmtD(r[0]) : fmtD(r[0]) + " ~ " + fmtD(r[1]);
+    // 날짜 칸(.dp): 숨은 date 입력값을 'yyyy-MM-dd (요일)' 로 보여 준다
+    function syncDp() {
+      document.querySelectorAll(".dp").forEach(l => {
+        const v = l.querySelector("input").value;
+        l.querySelector(".dp-t").innerHTML = v ? fmtDH(v) : "날짜 선택";
+      });
+    }
+    // ── 날짜 선택 달력 ── 칸을 누르면 아래에 달력이 뜨고, 날을 고르면 숨은 입력에 넣고 change 를 보낸다
+    const CAL = { el: null, input: null, anchor: null, ym: "" };
+    function calClose() {
+      if (CAL.el) CAL.el.remove();
+      if (CAL.anchor) CAL.anchor.classList.remove("open");
+      CAL.el = CAL.input = CAL.anchor = null;
+    }
+    function calOpen(anchor) {
+      const same = CAL.anchor === anchor;
+      calClose();
+      if (same) return;                                   // 같은 칸을 다시 누르면 닫기만
+      const input = anchor.querySelector("input");
+      CAL.input = input; CAL.anchor = anchor;
+      CAL.ym = (input.value || kstToday()).slice(0, 7);
+      CAL.el = document.createElement("div");
+      CAL.el.className = "cal";
+      CAL.el.addEventListener("mousedown", e => e.stopPropagation());
+      document.body.appendChild(CAL.el);
+      anchor.classList.add("open");
+      calRender();
+      const r = anchor.getBoundingClientRect(), w = CAL.el.offsetWidth, h = CAL.el.offsetHeight;
+      let left = Math.min(r.left, innerWidth - w - 8), top = r.bottom + 6;
+      if (top + h > innerHeight - 8) top = Math.max(8, r.top - h - 6);   // 아래 자리가 없으면 위로
+      CAL.el.style.left = Math.max(8, left) + "px";
+      CAL.el.style.top = top + "px";
+    }
+    function calRender() {
+      const today = kstToday(), max = today, sel = CAL.input.value, ym = CAL.ym;
+      const first = ym + "-01", last = monthEnd(ym), lead = dowOf(first);
+      let h = '<div class="cal-h"><button type="button" data-m="-1" aria-label="이전 달">‹</button>' +
+        '<b>' + ym.slice(0, 4) + '년 ' + (+ym.slice(5)) + '월</b>' +
+        '<button type="button" data-m="1" aria-label="다음 달"' + (ym >= today.slice(0, 7) ? " disabled" : "") + '>›</button></div>' +
+        '<div class="cal-g">' + DOWK.map((k, i) => '<span class="wk' + (i === 0 ? " sun" : i === 6 ? " sat" : "") + '">' + k + '</span>').join("");
+      for (let i = 0; i < lead; i++) h += '<span></span>';
+      for (let d = first; d <= last; d = dAdd(d, 1)) {
+        const w = dowOf(d);
+        h += '<button type="button" class="d' + (w === 0 ? " sun" : w === 6 ? " sat" : "") +
+          (d === today ? " now" : "") + (d === sel ? " sel" : "") + '" data-d="' + d + '"' +
+          (d > max ? " disabled" : "") + '>' + (+d.slice(8)) + '</button>';
+      }
+      h += '</div><div class="cal-f"><button type="button" data-d="' + today + '">오늘</button>' +
+           '<button type="button" data-x="1">닫기</button></div>';
+      CAL.el.innerHTML = h;
+      CAL.el.querySelectorAll("[data-m]").forEach(b => b.addEventListener("click", () => {
+        CAL.ym = ymAdd(CAL.ym, +b.dataset.m); calRender();
+      }));
+      CAL.el.querySelectorAll("[data-d]").forEach(b => b.addEventListener("click", () => {
+        const input = CAL.input;
+        input.value = b.dataset.d;
+        calClose();
+        input.dispatchEvent(new Event("change"));
+      }));
+      CAL.el.querySelector("[data-x]").addEventListener("click", calClose);
+    }
+    document.querySelectorAll(".dp").forEach(el => {
+      el.addEventListener("mousedown", e => e.stopPropagation());
+      el.addEventListener("click", () => calOpen(el));
+      el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); calOpen(el); } });
+    });
+    document.addEventListener("mousedown", calClose);
+    document.addEventListener("keydown", e => { if (e.key === "Escape") calClose(); });
+    addEventListener("scroll", calClose, { passive: true });
+    const monthEnd = ym => dAdd(dAdd(ym + "-01", 32).slice(0, 7) + "-01", -1);
+    const ymAdd = (ym, n) => dAdd(ym + "-15", Math.round(n * 30.5)).slice(0, 7);
+    const sumOf = rows => rows.reduce((s, r) => ({ a: s.a + r.a, b: s.b + r.b, c: s.c + r.c }), { a: 0, b: 0, c: 0 });
+    const inRange = (s, e) => (LG.data || []).filter(r => r.d >= s && r.d <= e);
+    const dlt = (n, p) => {
+      const d = Math.round((n - p) * 10) / 10;
+      return '<span class="dlt ' + (d > 0 ? "up" : d < 0 ? "down" : "same") + '">' + (d > 0 ? "+" + d : d) + '</span>';
+    };
+
+    function setView(v) {
+      document.querySelectorAll(".vtab").forEach(b => {
+        const on = b.dataset.view === v;
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-selected", on);
+      });
+      document.getElementById("viewLive").hidden = v === "log";
+      document.getElementById("viewLog").hidden = v !== "log";
+      try { localStorage.setItem("csView", v); } catch (e) {}
+      if (v === "log") { hideTip(); loadLog(); }
+    }
+    document.querySelectorAll(".vtab").forEach(b =>
+      b.addEventListener("click", () => setView(b.dataset.view)));
+
+    function loadLog() {
+      if (LG.loading || (LG.data && Date.now() - LG.at < 60000)) { renderLog(); return; }
+      LG.loading = true;
+      google.script.run
+        .withSuccessHandler(d => { LG.ch = d || []; renderCh(); })
+        .withFailureHandler(e => { LG.ch = []; console.error("getChojinChannels 실패", e); })
+        .getChojinChannels();
+      google.script.run
+        .withSuccessHandler(d => {
+          LG.loading = false; LG.data = d || []; LG.at = Date.now();
+          if (!LG.from) setMonth(kstToday().slice(0, 7), true);
+          if (!LG.A[0]) setCmp(LG.cmp, true);
+          renderLog();
+        })
+        .withFailureHandler(e => {
+          LG.loading = false;
+          document.getElementById("lgRows").innerHTML =
+            '<tr><td colspan="5" class="empty">불러오기 오류: ' + esc((e && e.message) || e) + '</td></tr>';
+        })
+        .getChojinLog();
+    }
+
+    // ── 조회 기간 ──
+    function setRange(from, to, quick, silent) {
+      if (from > to) { const t = from; from = to; to = t; }
+      LG.from = from; LG.to = to; LG.quick = quick || "";
+      if (!silent) renderLog();
+    }
+    function setMonth(ym, silent) {
+      const today = kstToday();
+      const e = monthEnd(ym);
+      setRange(ym + "-01", e > today ? today : e, "", silent);
+    }
+    // '오늘' — 이번 달 1일 ~ 오늘로 돌아간다
+    document.getElementById("lgToday").addEventListener("click", () => setMonth(kstToday().slice(0, 7)));
+    document.getElementById("lgPrev").addEventListener("click", () => setMonth(ymAdd(LG.from.slice(0, 7), -1)));
+    document.getElementById("lgNext").addEventListener("click", () => setMonth(ymAdd(LG.from.slice(0, 7), 1)));
+    document.querySelectorAll("#lgQuick button").forEach(b => b.addEventListener("click", () => {
+      const t = kstToday();
+      setRange(dAdd(t, -(+b.dataset.q - 1)), t, b.dataset.q);
+    }));
+    ["lgFrom", "lgTo"].forEach(id => document.getElementById(id).addEventListener("change", () => {
+      const f = document.getElementById("lgFrom").value, t = document.getElementById("lgTo").value;
+      if (f && t) setRange(f, t);
+    }));
+
+    // ── 기간 비교 ──
+    function setCmp(p, silent) {
+      const t = kstToday();
+      LG.cmp = p;
+      if (p === "day") { LG.A = [t, t]; LG.B = [dAdd(t, -1), dAdd(t, -1)]; }
+      else if (p === "week") {                 // 월요일 ~ 오늘 vs 지난주 같은 요일까지
+        const mon = dAdd(t, -((dowOf(t) + 6) % 7));
+        LG.A = [mon, t]; LG.B = [dAdd(mon, -7), dAdd(t, -7)];
+      } else if (p === "d7") { LG.A = [dAdd(t, -6), t]; LG.B = [dAdd(t, -13), dAdd(t, -7)]; }
+      else if (p === "month") {                // 1일 ~ 오늘 vs 지난달 같은 날짜까지
+        const pm = ymAdd(t.slice(0, 7), -1), pe = monthEnd(pm), same = pm + t.slice(7);
+        LG.A = [t.slice(0, 8) + "01", t]; LG.B = [pm + "-01", same > pe ? pe : same];
+      }
+      if (!silent) { renderCmp(); renderTable(); }
+    }
+    document.querySelectorAll("#cmpPresets button").forEach(b =>
+      b.addEventListener("click", () => setCmp(b.dataset.p)));
+    ["cmpAs", "cmpAe", "cmpBs", "cmpBe"].forEach(id => document.getElementById(id).addEventListener("change", () => {
+      const v = k => document.getElementById(k).value;
+      if (!v("cmpAs") || !v("cmpAe") || !v("cmpBs") || !v("cmpBe")) return;
+      LG.A = [v("cmpAs"), v("cmpAe")].sort(); LG.B = [v("cmpBs"), v("cmpBe")].sort();
+      LG.cmp = "";
+      renderCmp();
+      renderTable();                           // 표의 A/B 표시 갱신
+    }));
+
+    function renderCmp() {
+      if (!LG.data) return;
+      document.querySelectorAll("#cmpPresets button").forEach(b => b.classList.toggle("on", b.dataset.p === LG.cmp));
+      [["cmpAs", LG.A[0]], ["cmpAe", LG.A[1]], ["cmpBs", LG.B[0]], ["cmpBe", LG.B[1]]].forEach(x => {
+        const el = document.getElementById(x[0]);
+        el.value = x[1]; el.max = kstToday();
+      });
+      const ra = inRange(LG.A[0], LG.A[1]), rb = inRange(LG.B[0], LG.B[1]);
+      const sa = sumOf(ra), sb = sumOf(rb);
+      const avg = (s, n) => n ? Math.round(s / n * 10) / 10 : 0;
+      const ms = [
+        ["합계", sa.c, sb.c, ""], ["초진콜", sa.a, sb.a, "ma"], ["카톡", sa.b, sb.b, "mb"],
+        ["하루 평균 합계", avg(sa.c, ra.length), avg(sb.c, rb.length), "mv"]
+      ];
+      const lab = (r, rows) => fmtR(r) + " · 기록 " + rows.length + "일";
+      document.getElementById("cmpBody").innerHTML = ms.map(m => {
+        const mx = Math.max(m[1], m[2], 1);
+        const pct = m[2] ? Math.round((m[1] - m[2]) / m[2] * 100) : null;
+        const bar = (k, v) => '<div class="cmp-bar ' + k + '"><span class="t">' + k.toUpperCase() +
+          '</span><span class="tr"><i style="width:' + (v / mx * 100) + '%"></i></span><b>' + v + '</b></div>';
+        return '<div class="cmp-m ' + m[3] + '"><div class="row1"><span class="lbl">' + m[0] + '</span>' +
+          (pct === null ? "" : '<span class="pct">' + (pct > 0 ? "+" : "") + pct + '%</span>') +
+          dlt(m[1], m[2]) + '</div>' + bar("a", m[1]) + bar("b", m[2]) + '</div>';
+      }).join("") +
+        '<div class="cmp-note">A ' + lab(LG.A, ra) + '<br>B ' + lab(LG.B, rb) +
+        (rb.length ? "" : '<br>B 기간에 기록이 없습니다(기록은 ' + md(LG.data[0] ? LG.data[0].d : kstToday()) + '부터)') +
+        '</div>';
+      syncDp();
+    }
+
+    function renderLog() {
+      if (!LG.data) return;
+      const today = kstToday();
+      const first = LG.data.length ? LG.data[0].d : today;
+      const from = LG.from, to = LG.to;
+      const fi = document.getElementById("lgFrom"), ti = document.getElementById("lgTo");
+      fi.value = from; ti.value = to; fi.max = ti.max = today;
+      document.querySelectorAll("#lgQuick button").forEach(b => b.classList.toggle("on", b.dataset.q === LG.quick));
+      // 정확히 한 달(1일~말일 또는 오늘)이면 진하게, 아니면 시작 달을 흐리게
+      const ym = from.slice(0, 7), me = monthEnd(ym);
+      const isMonth = from.slice(8) === "01" && to.slice(0, 7) === ym && (to === me || to === today);
+      document.getElementById("lgMonth").textContent = ym.slice(0, 4) + "년 " + (+ym.slice(5)) + "월";
+      document.querySelector(".lg-month").classList.toggle("off", !isMonth);
+      document.getElementById("lgPrev").disabled = ym <= first.slice(0, 7);
+      document.getElementById("lgNext").disabled = ym >= today.slice(0, 7);
+      document.getElementById("lgToday").classList.toggle("at", from === today.slice(0, 8) + "01" && to === today);
+
+      const rows = inRange(from, to);
+      const byDay = {};
+      rows.forEach(r => { byDay[r.d] = r; });
+      const s = sumOf(rows), n = rows.length;
+      const best = rows.reduce((m, r) => (!m || r.c > m.c ? r : m), null);
+
+      document.getElementById("lgSub").textContent =
+        fmtD(from) + " ~ " + fmtD(to) + " · 기록 " + n + "일 · 매일 저녁 9시 자동 기록";
+      const kpi = (label, v, unit, sub, color, hero) =>
+        '<div class="lg-kpi' + (hero ? " hero" : "") + '" style="--k:' + color + '">' +
+        '<span class="k-l">' + label + '</span>' +
+        '<b class="k-v">' + v + '<small>' + unit + '</small></b>' +
+        '<span class="k-s">' + sub + '</span></div>';
+      document.getElementById("lgKpis").innerHTML =
+        kpi("기간 합계", s.c, "건", n ? "하루 평균 " + (s.c / n).toFixed(1) + "건" : "기록 없음", "var(--c-c)", true) +
+        kpi("초진콜", s.a, "건", s.c ? "합계의 " + Math.round(s.a / s.c * 100) + "%" : "—", "var(--c-a)") +
+        kpi("카톡", s.b, "건", s.c ? "합계의 " + Math.round(s.b / s.c * 100) + "%" : "—", "var(--c-b)") +
+        kpi("최고 기록", best ? best.c : 0, "건",
+            best ? fmtD(best.d) : "—", "#64748b");
+
+      // 일별 막대: 왼쪽이 시작일 → 오른쪽 끝이 가장 최근(오늘).
+      // 초진콜(초록)·카톡(노랑)을 쌓고, 칸 안에 각 개수를 적는다. 위 숫자는 합계.
+      const days = dDiff(from, to) + 1;
+      const dense = days > 45;
+      const every = dense ? Math.ceil(days / 31) : 1;          // 날이 많으면 날짜 글씨를 띄엄띄엄
+      const peak = Math.max(1, ...rows.map(r => Math.max(r.c, r.a + r.b)));
+      const PX = 190;                                           // 막대 최대 높이(.lg-bars 와 맞춤)
+      document.getElementById("lgBars").style.gap = dense ? "1px" : "4px";
+      document.getElementById("lgDays").style.gap = dense ? "1px" : "4px";
+      let bars = "", labels = "";
+      for (let j = 0; j < days; j++) {
+        const d = dAdd(from, j), r = byDay[d], w = dowOf(d);
+        const isT = d === today;
+        const cls = isT ? "now" : w === 6 ? "sat" : w === 0 ? "sun" : "";
+        const show = isT || !(j % every);
+        const txt = isT ? '<b class="pill">TODAY</b>' : !show ? "" : md(d);                    // 11/2, 11/3 …
+        // 날짜 밑에 요일 '(금)' — 막대가 촘촘할 땐 생략
+        labels += '<span class="' + cls + '">' + txt +
+          (show && !dense ? '<small>(' + DOWK[w] + ')</small>' : "") + '</span>';
+        if (!r) { bars += '<div class="lg-bar none' + (isT ? " today" : "") + '"><span class="v">0</span></div>'; continue; }
+        const etc = Math.max(0, r.c - r.a - r.b);
+        const seg = (v, bg, k) => '<i class="' + k + '" style="flex:' + v + ';background:' + bg + '">' +
+          (!dense && v && v / peak * PX >= 15 ? v : "") + '</i>';
+        bars += '<div class="lg-bar' + (r.c ? "" : " zero") + (isT ? " today" : "") + '" title="' + fmtD(d) +
+          "  초진콜 " + r.a + "개 · 카톡 " + r.b + "개 · 합계 " + r.c + '">' +
+          '<span class="v">' + (dense ? "" : r.c) + '</span>' +
+          '<div class="stk" style="height:' + (Math.max(r.c, r.a + r.b) / peak * 100) + '%">' +
+            seg(r.a, "var(--c-a)", "sa") + seg(r.b, "var(--c-b)", "sb") +
+            seg(etc, "color-mix(in srgb, var(--c-c) 55%, transparent)", "") +
+          '</div></div>';
+      }
+      document.getElementById("lgBars").innerHTML = bars;
+      document.getElementById("lgDays").innerHTML = labels;
+
+      renderTable();
+      renderCmp();
+      renderCh();
+      syncDp();
+    }
+
+    // 실시간 현황(20초 폴링)의 '초진콜'·'카톡예약' 칸 숫자로 초진기록의 오늘 줄을 바로 고친다.
+    // 값이 바뀌었고 초진기록 화면이 열려 있으면 다시 그린다.
+    function lgPatchToday(cols) {
+      if (!LG.data) return;
+      const pick = n => { const c = cols.find(x => x.name === n); return c ? numOf(c.now) : null; };
+      const a = pick("초진콜"), b = pick("카톡예약");
+      if (a === null || b === null) return;
+      const today = kstToday();
+      let r = LG.data.find(x => x.d === today);
+      if (r && r.a === a && r.b === b && r.c === a + b) {
+        if (!document.getElementById("viewLog").hidden) renderCh();
+        return;
+      }
+      if (!r) { r = { d: today }; LG.data.push(r); LG.data.sort((x, y) => x.d < y.d ? -1 : 1); }
+      r.a = a; r.b = b; r.c = a + b; r.live = true;
+      if (!document.getElementById("viewLog").hidden) renderLog();
+    }
+
+    // ── 유입 채널 ──
+    // 저장된 날은 '초진채널' 시트, 오늘은 실시간 현황의 마우스오버 명단(20초 폴링)에서 센다.
+    //   초진콜 명단 열 = [C, H, I, K] → K(하위 구분)는 4번째, 카톡예약 명단 열 = [G, D, E, H] → E 는 3번째
+    function chTodayLive() {
+      const cnt = (det, i) => {
+        if (!det || det.error || !det.rows) return null;
+        const m = {};
+        det.rows.forEach(r => { const k = String(r[i] || "").trim() || "미분류"; m[k] = (m[k] || 0) + 1; });
+        return m;
+      };
+      const a = cnt(todayDet["초진콜"], 3), b = cnt(todayDet["카톡예약"], 2);
+      return a && b ? { a: a, b: b } : null;
+    }
+    function renderCh() {
+      if (!LG.ch || !LG.from) return;
+      const today = kstToday(), live = chTodayLive();
+      const agg = { a: {}, b: {} };
+      LG.ch.forEach(r => {
+        if (r[0] < LG.from || r[0] > LG.to || (live && r[0] === today)) return;
+        agg[r[1]][r[2]] = (agg[r[1]][r[2]] || 0) + r[3];
+      });
+      if (live && today >= LG.from && today <= LG.to) {
+        ["a", "b"].forEach(k => Object.keys(live[k]).forEach(c => { agg[k][c] = (agg[k][c] || 0) + live[k][c]; }));
+      }
+      const draw = (m, listId, totId) => {
+        const items = Object.keys(m).map(c => [c, m[c]]).sort((x, y) => y[1] - x[1]);
+        const tot = items.reduce((s, x) => s + x[1], 0);
+        document.getElementById(totId).textContent = tot + "건";
+        const el = document.getElementById(listId);
+        if (!tot) { el.innerHTML = '<div class="ch-empty">이 기간 채널 기록이 없습니다</div>'; return; }
+        // 8개 넘으면 나머지는 '기타'로 묶는다
+        let shown = items;
+        if (items.length > 8) {
+          const rest = items.slice(7).reduce((s, x) => s + x[1], 0);
+          shown = items.slice(0, 7).concat([["기타 (" + (items.length - 7) + "개)", rest]]);
+        }
+        const mx = shown.reduce((s, x) => Math.max(s, x[1]), 1);
+        el.innerHTML = shown.map(x =>
+          '<div class="ch-row' + (x[0] === "미분류" ? " none" : "") + '" title="' + esc(x[0]) + '">' +
+          '<span class="nm">' + esc(x[0]) + '</span>' +
+          '<span class="tr"><i style="width:' + (x[1] / mx * 100) + '%"></i></span>' +
+          '<span class="v"><b>' + x[1] + '</b><span>' + Math.round(x[1] / tot * 100) + '%</span></span></div>'
+        ).join("");
+      };
+      draw(agg.a, "chListA", "chTotA");
+      draw(agg.b, "chListB", "chTotB");
+      document.getElementById("chSub").textContent = fmtD(LG.from) + " ~ " + fmtD(LG.to) + " · 오늘은 실시간";
+    }
+
+    // 표: 최근 날짜가 위. '전일 대비'는 바로 앞 기록일과 비교(기간 밖이어도).
+    function renderTable() {
+      if (!LG.data) return;
+      const today = kstToday();
+      const rows = inRange(LG.from, LG.to);
+      const tb = document.getElementById("lgRows");
+      if (!rows.length) {
+        tb.innerHTML = '<tr><td colspan="5" class="empty">이 기간에는 기록이 없습니다</td></tr>';
+        document.getElementById("lgFoot").innerHTML = "";
+        return;
+      }
+      const prevOf = {};
+      LG.data.forEach((r, i) => { prevOf[r.d] = i ? LG.data[i - 1] : null; });
+      const maxC = Math.max(1, ...rows.map(r => r.c));
+      const num = (v, c) => '<td class="n ' + c + (v ? "" : " z") + '">' + v + '</td>';
+      const isIn = (d, R) => d >= R[0] && d <= R[1];
+      tb.innerHTML = rows.slice().reverse().map(r => {
+        const w = dowOf(r.d), p = prevOf[r.d];
+        const cls = [r.d === today ? "today" : "", w === 6 ? "sat" : w === 0 ? "sun" : "",
+                     isIn(r.d, LG.A) ? "inA" : isIn(r.d, LG.B) ? "inB" : ""].join(" ");
+        return '<tr class="' + cls + '">' +
+          '<td class="d">' + r.d + '<span class="dw">(' + DOWK[w] + ')</span></td>' +
+          num(r.a, "ca") + num(r.b, "cb") +
+          '<td class="n tot"><div class="tb"><span class="track"><i style="width:' +
+            (r.c / maxC * 100) + '%"></i></span><b>' + r.c + '</b></div></td>' +
+          '<td class="n">' + (p ? dlt(r.c, p.c) : '<span class="dlt same">—</span>') + '</td></tr>';
+      }).join("");
+      const s = sumOf(rows);
+      document.getElementById("lgFoot").innerHTML =
+        '<tr><td>합계 · ' + rows.length + '일</td><td class="n ca">' + s.a + '</td><td class="n cb">' + s.b +
+        '</td><td class="n cc">' + s.c + '</td><td></td></tr>';
+    }
+
+    try { if (localStorage.getItem("csView") === "log") setView("log"); } catch (e) {}
+
+    load();
+    // 폴링은 백그라운드에서도 계속 돈다(안 그러면 다른 창 볼 때 새 상담 알람을 놓침).
+    // 화면에 보일 땐 20초, 백그라운드일 땐 30초로 늦춰 할당량을 아낀다.
+    // ※ 10초였을 때 여러 PC·탭이 동시에 폴링해 Apps Script '동시 실행 30개/사용자'
+    //   한도에 걸린 적이 있다. 더 줄이지 말 것.
+    let pollTimer = null;
+    function startPolling() {
+      clearInterval(pollTimer);
+      const interval = document.visibilityState === "visible" ? 20000 : 30000;
+      pollTimer = setInterval(load, interval);
+    }
+    startPolling();
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        // 브라우저가 숨은 탭의 오디오를 중단했을 수 있으니 복구 + 울릴 상태면 재예약
+        if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+        if (ringing) startBeep();
+        load();                                              // 돌아오면 즉시 1회
+      }
+      startPolling();                                        // 주기 재설정
+    });
+  </script>
+</body>
+</html>
