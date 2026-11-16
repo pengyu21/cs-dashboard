@@ -459,6 +459,34 @@
     td.tm, td.ph { color: var(--text-2); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
     td.ct { color: var(--text-2); }
     td.go-cell { text-align: right; white-space: nowrap; }
+    /* 카카오 예약 '확인' 체크 */
+    .ack {
+      display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; vertical-align: middle;
+      font-size: 12px; font-weight: 600; color: var(--text-2); cursor: pointer; user-select: none;
+    }
+    .ack input { width: 15px; height: 15px; margin: 0; cursor: pointer; accent-color: var(--accent); }
+    tr.acking { opacity: .4; transition: opacity .2s; }
+    /* 카카오톡 박스: 확인했지만 아직 확정·취소 전인 예약 수 */
+    .tile .waiting {
+      align-self: flex-start; margin-top: 6px; padding: 2px 9px; border-radius: 999px;
+      font: inherit; font-size: 12px; font-weight: 700; white-space: nowrap; cursor: pointer;
+      color: #92400e; background: #fef3c7; border: 1px solid #fcd34d;
+    }
+    .tile .waiting:hover { background: #fde68a; }
+    .tile .wait-list { list-style: none; margin: 6px 0 8px; padding: 0; font-size: 12px; }
+    /* 이름 + 되돌리기를 한 행에. 이름은 자르지 않고, 버튼은 오른쪽 끝에 붙인다 */
+    .tile .wait-list li {
+      display: flex; align-items: center; justify-content: space-between; gap: 6px;
+      padding: 5px 0; border-top: 1px dashed var(--border); cursor: default;
+    }
+    .tile .wait-list .wn { flex: none; white-space: nowrap; font-weight: 600; line-height: 1; }
+    .tile .wait-list .undo {
+      flex: none; font: inherit; font-size: 11px; font-weight: 600; cursor: pointer;
+      padding: 2px 7px; border-radius: 6px; color: var(--text-2);
+      background: transparent; border: 1px solid var(--border);
+    }
+    .tile .wait-list .undo:hover { color: #b91c1c; border-color: #fca5a5; }
+    .tile .wait-list .undo:disabled { opacity: .4; cursor: default; }
     .go {
       display: inline-flex; align-items: center; gap: 4px; text-decoration: none;
       font-size: 12px; font-weight: 600; white-space: nowrap; cursor: pointer;
@@ -940,6 +968,25 @@
     ];
     const subkindOf = r => SUBKINDS.find(
       k => k.channel === r[0] && String(r[2] || "").startsWith(k.mark)) || null;
+    // 카카오 예약 '확인' 체크 키 — Code.gs 의 ackKey_ 와 같아야 한다(채널|이름|시각|연락처)
+    const ackKey = r => [r[0], r[1], r[3], r[4]].join("|");
+    // 카카오톡 박스의 '예약대기 n명' 배지 + 펼치면 명단(건마다 되돌리기).
+    // 표는 20초마다 다시 그려지므로 펼침 상태는 따로 기억한다.
+    let waitOpen = false;
+    function waitingHtml(list) {
+      if (!Array.isArray(list) || !list.length) { waitOpen = false; return ""; }
+      return '<button type="button" class="waiting" data-wait-toggle ' +
+               'title="확인 체크했지만 아직 확정·취소 전인 카카오 예약 — 눌러서 명단 보기·되돌리기">' +
+               '예약대기 ' + list.length + '명 ' + (waitOpen ? "▴" : "▾") + '</button>' +
+        (waitOpen
+          ? '<ul class="wait-list">' + list.map(r =>
+              // 동명이인 구분: 연락처·신청시각은 이름에 마우스를 올리면 보인다(박스 폭이 좁아 화면엔 이름만)
+              '<li title="' + esc(r[1] + " · " + (r[4] || "연락처 없음") + " · " + fmtTime(r[3])) + '">' +
+              '<span class="wn">' + esc(r[1]) + '</span>' +
+              '<button type="button" class="undo" data-unack="' + esc(ackKey(r)) + '" data-nm="' + esc(r[1]) + '">' +
+              '되돌리기</button></li>').join("") + '</ul>'
+          : "");
+    }
     // 채널별 대표 아이콘 (인라인 SVG · 외부 이미지 의존 없음)
     const ICO = {
       "강남언니":   '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/>',
@@ -1153,6 +1200,7 @@
     // → '읽는 순간이 나빴던 것'으로 보고 직전 화면을 그대로 둔다.
     //   (한 번도 못 그린 첫 로드는 그대로 그린다 — 빈 화면이라도 보여야 하므로)
     let rendered = false;
+    let lastData = null;               // 마지막으로 그린 데이터(예약대기 펼치기 때 다시 그리기용)
     function looksPartial(data) {
       const chs = (data && data.channels) || [];
       if (!chs.length) return true;                  // ① 지우는 중에 읽음
@@ -1163,6 +1211,7 @@
 
     function render(data) {
       if (rendered && looksPartial(data)) return;    // 직전 화면 유지
+      lastData = data;
       // 스탬프는 '2026-07-21 (화) 15:25:58 업데이트 완료 · YSG' 형태.
       // 뒤의 PC 이름을 떼어 별도 배지로 보여준다(어느 PC가 수집 중인지 구분).
       const raw = String(data.updated || "");
@@ -1288,7 +1337,7 @@
         return '<div class="tile ' + cls + '" style="--ch:' + color + '"' + tip + '>' +
           '<div class="thead"><span class="ico">' + icon(c.name) + '</span>' +
           '<span class="cname">' + esc(c.name) + '</span></div>' +
-          body + bal +
+          body + bal + (c.name === "카카오톡" ? waitingHtml(data.kakaoWaiting) : '') +
           '<a class="go" href="' + esc(url) + '" target="_blank" rel="noopener">바로가기 ↗</a>' +
         '</div>';
       }).join("");
@@ -1310,7 +1359,13 @@
           '<td class="ct">' + esc(text) + '</td>' +
           '<td class="tm">' + esc(fmtTime(r[3])) + '</td>' +
           '<td class="ph">' + (esc(r[4]) || "—") + '</td>' +
-          '<td class="go-cell"><a class="go" href="' + esc(url) + '" target="_blank" rel="noopener">바로가기 ↗</a></td>' +
+          '<td class="go-cell">' +
+            // 카카오 예약만: 고객 부재로 확정·취소를 못 해도 '확인했음'을 표시해 목록에서 뺀다
+            (kind && kind.tag === "예약"
+              ? '<label class="ack" title="확인한 예약 — 미확인 목록에서 빼고 \'예약대기\'로 넘깁니다">' +
+                '<input type="checkbox" data-ack="' + esc(ackKey(r)) + '" data-nm="' + esc(r[1]) + '">확인</label>'
+              : '') +
+            '<a class="go" href="' + esc(url) + '" target="_blank" rel="noopener">바로가기 ↗</a></td>' +
         '</tr>';
       }).join("") : '<tr><td colspan="6" class="empty">미확인 상담이 없습니다 ✓</td></tr>';
 
@@ -1649,6 +1704,50 @@
         })
         .getDashboard();
     }
+
+    // 카카오 예약 '확인' 체크 → 서버에 기록하고, 돌려받은 최신 화면으로 다시 그린다.
+    // (표는 20초마다 다시 그려지므로 이벤트는 tbody 에 한 번만 건다)
+    document.getElementById("rows").addEventListener("change", e => {
+      const cb = e.target;
+      if (!cb.matches || !cb.matches("input[data-ack]")) return;
+      if (!confirm((cb.dataset.nm || "이") + " 님 예약을 확인 처리할까요?\n" +
+                   "미확인 목록에서 빠지고 카카오톡 박스의 '예약대기'로 넘어갑니다.")) {
+        cb.checked = false;
+        return;
+      }
+      const tr = cb.closest("tr");
+      cb.disabled = true;
+      if (tr) tr.classList.add("acking");
+      google.script.run
+        .withSuccessHandler(d => { try { render(d); } catch (err) { console.error(err); load(); } })
+        .withFailureHandler(err => {
+          cb.checked = false; cb.disabled = false;
+          if (tr) tr.classList.remove("acking");
+          alert("확인 처리 실패: " + ((err && err.message) || err));
+        })
+        .ackKakaoReservation(cb.dataset.ack);
+    });
+
+    // 카카오톡 박스: '예약대기' 배지 펼치기 / 잘못 체크한 건 되돌리기
+
+    document.getElementById("tiles").addEventListener("click", e => {
+      const t = e.target.closest && e.target.closest("[data-wait-toggle], [data-unack]");
+      if (!t) return;
+      if (t.hasAttribute("data-wait-toggle")) {
+        waitOpen = !waitOpen;
+        if (lastData) render(lastData);
+        return;
+      }
+      if (!confirm((t.dataset.nm || "이") + " 님 확인 체크를 되돌릴까요?\n미확인 목록으로 다시 올라갑니다.")) return;
+      t.disabled = true;
+      google.script.run
+        .withSuccessHandler(d => { try { render(d); } catch (err) { console.error(err); load(); } })
+        .withFailureHandler(err => {
+          t.disabled = false;
+          alert("되돌리기 실패: " + ((err && err.message) || err));
+        })
+        .unackKakaoReservation(t.dataset.unack);
+    });
 
     // 새로고침 버튼: 알람을 다시 무장(ackLevel 초기화)하고 즉시 재조회.
     // → 껐던 알람도 새로고침하면 미확인이 남아 있는 한 다시 울린다.

@@ -87,12 +87,90 @@ function doGet() {
 function getDashboard() {
   const cache = CacheService.getScriptCache();
   const hit = cache.get("dashboard");
-  if (hit) return JSON.parse(hit);
+  // 캐시에는 '시트 원본'을 두고, 확인 처리(체크) 거르기는 매번 나중에 한다
+  // → 체크하자마자(캐시 8초를 기다리지 않고) 모든 PC 화면에서 빠진다.
+  if (hit) return applyAcks_(JSON.parse(hit));
 
   const out = buildDashboard_();
   // 100KB 를 넘으면 캐시에 못 넣는다 — 그때는 그냥 캐시 없이 돌린다(기능은 정상).
   try { cache.put("dashboard", JSON.stringify(out), DASH_CACHE_SEC); } catch (e) {}
-  return out;
+  return applyAcks_(out);
+}
+
+// ── 카카오 예약 '확인' 체크 ─────────────────────────────────────
+// 카카오 예약은 관리자에서 '확정/취소' 둘 중 하나만 고를 수 있어서,
+// 고객이 전화를 안 받으면 우리가 확인했어도 '예약신청'으로 계속 남는다.
+// → 대시보드에서 체크한 건은 미확인 목록·건수·알람에서 뺀다.
+//   스크립트 속성에 저장하므로 모든 PC·탭에 같이 반영된다.
+//   키 = 채널|이름|신청일시|연락처 (Index.html 의 ackKey 와 같아야 한다)
+const ACK_PROP     = "kakao_resv_ack";   // { 키: 체크한 시각(ms) }
+const ACK_MARK     = "[예약] ";          // total.py 가 카카오 예약 '내용' 앞에 붙이는 표식
+const ACK_KEEP_DAY = 60;                 // 이보다 오래된 체크 기록은 지운다(속성 용량 9KB 대비)
+
+function ackKey_(r) { return [r[0], r[1], r[3], r[4]].join("|"); }
+function isKakaoResv_(r) { return r[0] === "카카오톡" && String(r[2] || "").indexOf(ACK_MARK) === 0; }
+
+function readAcks_() {
+  try { return JSON.parse(PropertiesService.getScriptProperties().getProperty(ACK_PROP) || "{}"); }
+  catch (e) { return {}; }
+}
+
+/** 체크된 카카오 예약을 목록에서 빼고, 카카오톡 미확인 건수도 그만큼 줄인다 */
+function applyAcks_(d) {
+  const acks = readAcks_();
+  if (!Object.keys(acks).length || !d || !d.items) return d;
+  // 확인은 했지만 아직 확정·취소 전인 예약 → 카카오톡 박스에 '예약대기 n명' + 되돌리기 명단
+  const waiting = [];
+  d.items = d.items.filter(function (r) {
+    if (isKakaoResv_(r) && acks[ackKey_(r)]) { waiting.push(r); return false; }
+    return true;
+  });
+  const removed = waiting.length;
+  d.kakaoWaiting = waiting;
+  if (removed) (d.channels || []).forEach(function (c) {
+    const n = parseInt(c.count, 10);
+    if (c.name === "카카오톡" && !isNaN(n)) c.count = String(Math.max(0, n - removed));
+  });
+  return d;
+}
+
+/** 화면에서 체크 → 확인 처리 후 갱신된 대시보드를 돌려준다 */
+function ackKakaoReservation(key) {
+  key = String(key || "");
+  if (key.indexOf("카카오톡|") !== 0) throw new Error("카카오 예약만 확인 처리할 수 있습니다");
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const acks = readAcks_();
+    const cutoff = Date.now() - ACK_KEEP_DAY * 86400000;
+    Object.keys(acks).forEach(function (k) { if (acks[k] < cutoff) delete acks[k]; });
+    acks[key] = Date.now();
+    PropertiesService.getScriptProperties().setProperty(ACK_PROP, JSON.stringify(acks));
+  } finally {
+    lock.releaseLock();
+  }
+  return getDashboard();
+}
+
+/** 잘못 체크했을 때(카카오톡 박스 '예약대기' 명단의 되돌리기) → 다시 미확인으로 */
+function unackKakaoReservation(key) {
+  key = String(key || "");
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const acks = readAcks_();
+    delete acks[key];
+    PropertiesService.getScriptProperties().setProperty(ACK_PROP, JSON.stringify(acks));
+  } finally {
+    lock.releaseLock();
+  }
+  return getDashboard();
+}
+
+/** ★ 체크 기록 전체 초기화(편집기에서 실행) — 평소엔 화면의 되돌리기를 쓰면 된다 */
+function RESET_카톡예약확인() {
+  PropertiesService.getScriptProperties().deleteProperty(ACK_PROP);
+  Logger.log("카카오 예약 확인 기록을 모두 지웠습니다.");
 }
 
 /** 실제 시트 읽기(캐시 미스일 때만 호출된다) */
