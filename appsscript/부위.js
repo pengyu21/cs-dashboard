@@ -5,7 +5,7 @@
  *            지난 달 = 드라이브 연도 폴더(CHOJIN_FOLDERS)의 'N월 전화내역' 탭(현재 L열 '부위').
  *                      화면에서 그 달을 처음 열 때 한 번 읽어 '초진부위' 시트에 저장하고, 다음부터는 저장값을 쓴다.
  *   부위 열 = 머리글(앞 6줄)에 '부위'가 들어간 칸. TODAY '초진콜' 은 못 찾으면 I열.
- *   행 조건: TODAY 초진콜은 상담예약 날짜(K) 채워짐(CALL_SPEC, 유입 채널과 같음), 카톡은 G 채워짐 / 드라이브: '상담예약' 채워짐.
+ *   행 조건: TODAY 초진콜은 F 에 '진'(CALL_SPEC = C4·유입 채널과 같음), 카톡은 G 채워짐 / 드라이브: '상담예약' 채워짐.
  *   한 줄 = 1건. '골절+코재수술' 처럼 여러 부위가 적혀도 나누지 않고 적힌 그대로 한 항목으로 센다.
  */
 const PART_FALLBACK = { "초진콜": "I", "카톡예약": "" };   // '' = 머리글에서 못 찾으면 안 셈
@@ -30,7 +30,7 @@ function partCol_(disp, fallback) {
 
 /** TODAY 문서 시트 하나 → [[날짜, 부위, 건수], …] */
 function partRows_(ss, key) {
-  const spec = key === "초진콜" ? CALL_SPEC : TODAY_DETAILS[key];   // 초진콜 = 상담예약 날짜(K) 채워진 줄
+  const spec = key === "초진콜" ? CALL_SPEC : TODAY_DETAILS[key];   // 초진콜 = CALL_SPEC(채널.js)
   const sh = ss.getSheetByName(spec.tab);
   if (!sh) throw new Error("'" + spec.tab + "' 시트를 찾을 수 없습니다");
   const nR = sh.getLastRow(), nC = sh.getLastColumn();

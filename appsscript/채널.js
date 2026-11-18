@@ -9,10 +9,11 @@ const CH_TAB = "초진채널";
 const CH_CALL_COL  = "H";   // TODAY '초진콜' 시트의 하위 구분
 const CH_KAKAO_COL = "E";   // TODAY '카톡' 시트의 채널
 const CH_NONE = "미기재";
-// TODAY '초진콜' 시트에서 초진콜로 세는 줄 = 날짜(B)가 그날이고 상담예약 날짜(K)가 채워진 줄.
-// 유입 채널·부위 분포가 같은 기준을 쓴다(드라이브 'N월 전화내역' 의 '상담예약 채워짐' 과 같은 뜻).
+// TODAY '초진콜' 시트에서 초진콜로 세는 줄 = 날짜(B)가 그날이고 F 에 '진' 이 든 줄.
+// TODAY C4(초진기록·KPI 의 초진콜 숫자)와 같은 기준 — 유입 채널·부위 분포 합계가 KPI 와 맞아야 한다.
+// (K 상담예약 날짜 기준으로 바꿨더니 2건 모자랐다 — 2026-11-18 확인)
 // ※ 다른 파일의 상수를 참조하지 않는 리터럴로 둔다(파일 로드 순서와 무관하게).
-const CALL_SPEC = { tab: "초진콜", today: "B", has: "K" };
+const CALL_SPEC = { tab: "초진콜", today: "B", like: ["F", "진"] };
 /** 채널 칸 값 정리: 빈 칸·옛 '미분류' → '미기재' */
 function chName_(v) {
   const s = String(v == null ? "" : v).trim();
