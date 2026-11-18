@@ -1854,7 +1854,7 @@
     // 날짜는 전부 'yyyy-MM-dd' 문자열로 다룬다(문자열 비교 = 날짜 비교).
     const LG = { data: null, loading: false, at: 0, from: "", to: "", quick: "", cmp: "d7",
                  A: ["", ""], B: ["", ""], side: true,     // side: 표를 A/B 나란히 비교로(기본)
-                 desc: true, pt: null };                // desc: 나란히 표 최신 날짜가 위(기본) / pt: 부위 분포
+                 desc: true, pt: {} };                  // desc: 나란히 표 최신 날짜가 위(기본) / pt: 부위 분포(기간별 캐시)
     const kstToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }).format(new Date());
     const dAdd = (d, n) => {
       const t = new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8)) + n * 86400000);
@@ -1967,10 +1967,6 @@
         .withSuccessHandler(d => { LG.ch = d || []; renderCh(); })
         .withFailureHandler(e => { LG.ch = []; console.error("getChojinChannels 실패", e); })
         .getChojinChannels();
-      google.script.run
-        .withSuccessHandler(d => { LG.pt = d || { rows: [], err: {} }; renderPt(); })
-        .withFailureHandler(e => { LG.pt = { rows: [], err: { a: String((e && e.message) || e), b: String((e && e.message) || e) } }; renderPt(); })
-        .getChojinParts();
       google.script.run
         .withSuccessHandler(d => {
           LG.loading = false; LG.data = d || []; LG.at = Date.now();
@@ -2253,16 +2249,44 @@
       }
     }
 
-    // ── 부위 분포 ── TODAY '초진콜'(I열 부위)·'카톡' 시트를 서버가 바로 세어 준다(1분 캐시).
+    // ── 부위 분포 ── 기간을 바꿀 때마다 서버에 그 기간만 요청한다(부위.js getChojinParts).
+    //   이번 달 초진콜·카톡 = TODAY 시트 실시간 / 지난 달 초진콜 = 드라이브 'N월 전화내역' L열
+    //   (처음 여는 지난 달은 드라이브를 읽느라 몇 초 걸리고, 그 뒤로는 저장값이라 빠르다)
     // 한 줄 = 1건. '골절+코재수술' 처럼 여러 부위가 적혀도 나누지 않고 그대로 한 항목.
     function renderPt() {
-      if (!LG.pt || !LG.from) return;
+      if (!LG.from) return;
+      const key = LG.from + "|" + LG.to;
+      const c = LG.pt[key];
+      // 처음 보는 기간이거나, 오늘이 든 기간인데 1분이 지났으면 다시 받는다
+      if (!c || (!c.busy && LG.to >= kstToday() && Date.now() - c.at > 60000)) {
+        const slot = LG.pt[key] = Object.assign(c || {}, { busy: true });
+        google.script.run
+          .withSuccessHandler(d => {
+            Object.assign(slot, { busy: false, at: Date.now(), d: d || { rows: [], err: {} } });
+            if (LG.from + "|" + LG.to === key) renderPt();
+          })
+          .withFailureHandler(e => {
+            const m = String((e && e.message) || e);
+            Object.assign(slot, { busy: false, at: Date.now(), d: { rows: [], err: { a: m, b: m } } });
+            if (LG.from + "|" + LG.to === key) renderPt();
+          })
+          .getChojinParts(LG.from, LG.to);
+      }
+      if (!LG.pt[key].d) {                     // 아직 한 번도 못 받은 기간
+        ["ptListA", "ptListB"].forEach(id => {
+          document.getElementById(id).innerHTML = '<div class="ch-empty">불러오는 중… (지난 달은 처음 한 번 몇 초 걸려요)</div>';
+        });
+        ["ptTotA", "ptTotB"].forEach(id => { document.getElementById(id).textContent = ""; });
+        document.getElementById("ptSub").textContent = fmtD(LG.from) + " ~ " + fmtD(LG.to);
+        return;
+      }
+      const P = LG.pt[key].d;
       const agg = { a: {}, b: {} };
-      LG.pt.rows.forEach(r => {
+      P.rows.forEach(r => {
         if (r[0] < LG.from || r[0] > LG.to) return;
         const m = agg[r[1]]; m[r[2]] = (m[r[2]] || 0) + r[3];
       });
-      const err = LG.pt.err || {};
+      const err = P.err || {};
       drawDist(agg.a, "ptListA", "ptTotA", err.a || "이 기간 부위 기록이 없습니다");
       drawDist(agg.b, "ptListB", "ptTotB", err.b || "이 기간 부위 기록이 없습니다");
       document.getElementById("ptSub").textContent = fmtD(LG.from) + " ~ " + fmtD(LG.to) +
