@@ -39,6 +39,8 @@
     }
     /* 실제로 붙어 있을 때만 그림자 — 맨 위에서는 평평하게 */
     header.stuck { box-shadow: 0 6px 16px -8px rgba(20,30,45,.28); }
+    /* 초진기록 탭에선 헤더를 고정하지 않는다(표·비교를 넓게 보도록) */
+    body.v-log header { position: static; box-shadow: none; }
     @media (prefers-color-scheme: dark) {
       header.stuck { box-shadow: 0 6px 16px -6px rgba(0,0,0,.6); }
     }
@@ -425,7 +427,8 @@
     thead th:nth-child(3), tbody td:nth-child(3) { width: auto;  }  /* 내용 (남는 공간 흡수) */
     thead th:nth-child(4), tbody td:nth-child(4) { width: 158px; }  /* 시각 */
     thead th:nth-child(5), tbody td:nth-child(5) { width: 132px; }  /* 연락처 */
-    thead th:nth-child(6), tbody td:nth-child(6) { width: 108px; }  /* 바로가기 */
+    thead th:nth-child(6), tbody td:nth-child(6) { width: 72px;  }  /* 확인(카카오 예약) */
+    thead th:nth-child(7), tbody td:nth-child(7) { width: 108px; }  /* 바로가기 */
     thead th {
       text-align: left; font-size: 11.5px; font-weight: 700; letter-spacing: .03em;
       color: var(--text-3); text-transform: uppercase; padding: 11px 16px;
@@ -459,9 +462,10 @@
     td.tm, td.ph { color: var(--text-2); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
     td.ct { color: var(--text-2); }
     td.go-cell { text-align: right; white-space: nowrap; }
-    /* 카카오 예약 '확인' 체크 */
+    /* 카카오 예약 '확인' 체크 — 전용 열에서 가운데 정렬 */
+    thead th.ack-h, td.ack-cell { text-align: center; white-space: nowrap; }
     .ack {
-      display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; vertical-align: middle;
+      display: inline-flex; align-items: center; gap: 4px; vertical-align: middle;
       font-size: 12px; font-weight: 600; color: var(--text-2); cursor: pointer; user-select: none;
     }
     .ack input { width: 15px; height: 15px; margin: 0; cursor: pointer; accent-color: var(--accent); }
@@ -647,7 +651,7 @@
     .cmp-note { margin-top: 10px; font-size: 11.5px; color: var(--text-3); }
 
     /* ── 색 체계: 초진콜=초록 · 카톡=짙은 노랑 · 합계=보라. A/B 기간은 진한/연한 회청색 ── */
-    .lg { --c-a: #16a34a; --c-b: #f5b700; --c-b-t: #b88400; --c-c: #6366f1; --c-A: #334155; --c-B: #94a3b8; }
+    .lg { --c-a: #16a34a; --c-b: #f5b700; --c-b-t: #a16207; --c-c: #6366f1; --c-A: #334155; --c-B: #94a3b8; }
     @media (prefers-color-scheme: dark) {
       .lg { --c-a: #22c55e; --c-b: #facc15; --c-b-t: #facc15; --c-c: #818cf8; --c-A: #cbd5e1; --c-B: #64748b; }
     }
@@ -720,15 +724,10 @@
 
     /* ── 표 카드와 비교 카드 높이를 맞춘다: 행 높이는 비교 카드가 정하고, 표는 그 안에서 스크롤 ── */
     .lg-main { align-items: stretch; }
-    .lg-tbl { position: relative; min-height: 360px; }
-    .lg-tbl .table-wrap { position: absolute; inset: 0; overflow: auto; }
-    .lg-tbl thead th { position: sticky; top: 0; z-index: 1; }
-    .lg-tbl tfoot td { position: sticky; bottom: 0; z-index: 1; }
+    /* 표는 틀(안쪽 스크롤·머리/합계 고정) 없이 전체 길이로 펼친다 */
+    .lg-tbl { position: relative; }
+    .lg-tbl .table-wrap { overflow-x: auto; }
     .lg td.d { font-size: 13px; }
-    @media (max-width: 1020px) {
-      .lg-tbl { min-height: 0; }
-      .lg-tbl .table-wrap { position: static; max-height: 560px; }
-    }
     .lg thead th.n, .lg td.n { text-align: right; }
     .lg td.n { font-variant-numeric: tabular-nums; font-weight: 600; }
     .lg td.d { white-space: nowrap; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -749,6 +748,47 @@
       padding: 12px 16px; font-size: 13.5px; font-weight: 800; background: var(--surface-2);
       border-top: 1px solid var(--border); font-variant-numeric: tabular-nums;
     }
+    /* ── 표: A/B 나란히 비교 ── */
+    .lg-tbl table[hidden] { display: none; }
+    .lg #cmpTbl thead th, .lg #cmpTbl tbody td, .lg #cmpTbl tfoot td { padding-left: 8px; padding-right: 8px; }
+    .lg #cmpTbl th.ga { color: var(--c-A); } .lg #cmpTbl th.gb { color: var(--text-2); }
+    .lg #cmpTbl td.sepB, .lg #cmpTbl th.sepB { border-left: 2px solid var(--border); }
+    .lg #cmpTbl td.sepD, .lg #cmpTbl th.sepD { border-left: 1px dashed var(--border); }
+    .lg #cmpTbl td.d { font-size: 12.5px; }
+    /* A = 연노랑(레몬) 바탕, B = 연파랑 바탕 → 반쪽씩 색으로 구분(글자 가독성 해치지 않게 아주 옅게) */
+    .lg { --hA: #fde047; --hB: #3b82f6; }
+    .lg #cmpTbl .ha { background: color-mix(in srgb, var(--hA) 15%, var(--surface)); }
+    .lg #cmpTbl .hb { background: color-mix(in srgb, var(--hB) 5%, var(--surface)); }
+    .lg #cmpTbl thead th.ha { background: color-mix(in srgb, var(--hA) 32%, var(--surface)); }
+    .lg #cmpTbl thead th.hb { background: color-mix(in srgb, var(--hB) 10%, var(--surface)); }
+    .lg #cmpTbl tfoot td.ha { background: color-mix(in srgb, var(--hA) 28%, var(--surface)); }
+    .lg #cmpTbl tfoot td.hb { background: color-mix(in srgb, var(--hB) 9%, var(--surface)); }
+    .lg #cmpTbl tr.today td.ha { background: color-mix(in srgb, var(--hA) 34%, var(--surface)); }
+    .lg #cmpTbl tr.today td.hb { background: color-mix(in srgb, var(--hB) 5%, var(--surface)); }
+    .lg #cmpTbl tr.today td.sepD { background: var(--surface); }
+    .lg #cmpTbl td.d.a { box-shadow: inset 3px 0 0 #eab308; }
+    .lg #cmpTbl td.d.b { box-shadow: inset 3px 0 0 var(--hB); }
+    .lg #cmpTbl th.ga, .lg #cmpTbl th.gb { font-weight: 800; color: var(--text); }
+    .lg #cmpTbl .gtag { display: inline-grid; place-items: center; width: 18px; height: 18px; margin-right: 5px;
+                        border-radius: 5px; font-size: 11px; font-weight: 800; color: #fff; vertical-align: 0; }
+    .lg #cmpTbl .gtag.a { background: #ca8a04; } .lg #cmpTbl .gtag.b { background: var(--hB); }
+    /* 오른쪽 비교 패널의 A/B 표시도 같은 색으로 맞춘다 */
+    .lg .cmp-range.a, .lg .cmp-bar.a { --tc: #ca8a04; } .lg .cmp-range.b, .lg .cmp-bar.b { --tc: var(--hB); }
+    .lg #cmpTbl td.na { color: var(--text-3); font-weight: 500; text-align: center; }
+    .lg #cmpTbl td.ta { color: var(--c-c); font-weight: 800; font-size: 14px; }
+    .lg #cmpTbl td.tb2 { color: var(--text-2); font-weight: 700; font-size: 14px; }
+    .lg #cmpTbl tbody td.sat .dw { color: #3b82f6; } .lg #cmpTbl tbody td.sun .dw { color: var(--crit); }
+    .lg #cmpTbl tr.today td.d.a::after { margin-left: 5px; padding: 0 6px; font-size: 10px; }
+    .lg #cmpTbl tr.today td.d.b::after { content: none; }
+    .cmp-view { margin-left: auto; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700;
+                border: 1px solid var(--border); background: var(--surface); color: var(--text-2); cursor: pointer; }
+    .cmp-view.on { color: var(--c-A); border-color: var(--c-A);
+                   background: color-mix(in srgb, var(--c-A) 8%, var(--surface)); }
+    /* 나란히 비교 표 날짜 정렬(내림차순 ↔ 오름차순) */
+    .sort-btn { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 3px;
+                padding: 1px 6px; margin-left: -2px; border-radius: 6px; font: inherit; color: inherit; }
+    .sort-btn:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+    .sort-btn i { font-style: normal; font-size: 10px; opacity: .75; }
     /* ── 유입 채널 ── */
     .lg-ch { padding: 18px 18px 16px; margin-bottom: 16px; }
     .ch-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
@@ -766,6 +806,22 @@
     .ch-row .v b { font-size: 14px; }
     .ch-row .v span { color: var(--text-3); font-size: 12px; margin-left: 5px; }
     .ch-row.none .nm { color: var(--text-3); }
+    .ch-row.etc { cursor: default; }
+    .ch-row.etc .nm { text-decoration: underline dotted var(--text-3); text-underline-offset: 3px; }
+    /* '기타' 펼침: 마우스를 올리면 열리고 ✕ 또는 Esc 로만 닫힌다(안에서 스크롤 가능) */
+    .ch-pop { position: absolute; z-index: 50; min-width: 190px; padding: 6px 4px 6px 10px;
+              background: var(--surface, #fff); border: 1px solid var(--border, #e5e7eb); border-radius: 10px;
+              box-shadow: 0 10px 30px -8px rgba(0,0,0,.25); font-size: 13px; }
+    .ch-pop[hidden] { display: none; }
+    .ch-pop .ph { display: flex; align-items: center; gap: 8px; padding: 2px 4px 6px 0; margin-bottom: 4px;
+                  border-bottom: 1px solid var(--border, #e5e7eb); font-weight: 800; font-size: 12.5px; }
+    .ch-pop .px { all: unset; margin-left: auto; cursor: pointer; width: 22px; height: 22px; border-radius: 6px;
+                  display: inline-flex; align-items: center; justify-content: center; color: var(--text-2); font-size: 14px; }
+    .ch-pop .px:hover { background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--text); }
+    .ch-pop .pl { max-height: 300px; overflow: auto; padding-right: 6px; overscroll-behavior: contain; }
+    .ch-pop .pr { display: flex; justify-content: space-between; gap: 16px; padding: 3px 0; }
+    .ch-pop b { font-variant-numeric: tabular-nums; }
+    .ch-pop .pr span:last-child { color: var(--text-3); white-space: nowrap; }
     .ch-empty { padding: 14px 0; color: var(--text-3); font-size: 13px; }
     @media (max-width: 860px) { .lg-kpis { grid-template-columns: repeat(2, 1fr); } }
     .lg-bars { height: 230px; }
@@ -878,6 +934,13 @@
           <div class="ch-col" style="--k:var(--c-b)"><div class="ch-h"><span class="ch-dot"></span>카톡<b id="chTotB"></b></div><div id="chListB"></div></div>
         </div>
       </div>
+      <div class="card lg-ch">
+        <div class="lg-chart-h"><b>부위 분포</b><span class="lg-sub" id="ptSub">선택한 기간 기준</span></div>
+        <div class="ch-cols">
+          <div class="ch-col" style="--k:var(--c-a)"><div class="ch-h"><span class="ch-dot"></span>초진콜<b id="ptTotA"></b></div><div id="ptListA"><div class="ch-empty">불러오는 중…</div></div></div>
+          <div class="ch-col" style="--k:var(--c-b)"><div class="ch-h"><span class="ch-dot"></span>카톡<b id="ptTotB"></b></div><div id="ptListB"><div class="ch-empty">불러오는 중…</div></div></div>
+        </div>
+      </div>
       <div class="lg-main">
         <div class="card lg-tbl">
           <div class="table-wrap">
@@ -891,11 +954,25 @@
               <tbody id="lgRows"><tr><td colspan="5" class="empty">불러오는 중…</td></tr></tbody>
               <tfoot id="lgFoot"></tfoot>
             </table>
+            <!-- 기간 비교를 고르면 위 표 대신 A/B 를 날짜별로 나란히 보여준다 -->
+            <table id="cmpTbl" hidden>
+              <colgroup><col style="width:108px"><col style="width:60px"><col style="width:52px"><col style="width:56px">
+                <col style="width:108px"><col style="width:60px"><col style="width:52px"><col style="width:56px">
+                <col style="width:70px"></colgroup>
+              <thead><tr><th class="ga ha"><span class="gtag a">A</span><button type="button" class="sort-btn">날짜<i></i></button></th><th class="n ha"><span class="sw" style="background:var(--c-a)"></span>초진콜</th>
+                <th class="n ha"><span class="sw" style="background:var(--c-b)"></span>카톡</th><th class="n ga ha">합계</th>
+                <th class="gb hb sepB"><span class="gtag b">B</span><button type="button" class="sort-btn">날짜<i></i></button></th><th class="n hb"><span class="sw" style="background:var(--c-a)"></span>초진콜</th>
+                <th class="n hb"><span class="sw" style="background:var(--c-b)"></span>카톡</th><th class="n gb hb">합계</th>
+                <th class="n sepD">A−B</th></tr></thead>
+              <tbody id="cmpRows"></tbody>
+              <tfoot id="cmpFoot"></tfoot>
+            </table>
           </div>
         </div>
         <!-- 기간 비교: 빠른 선택 또는 날짜 직접 선택 -->
         <div class="card lg-cmp">
-          <div class="cmp-h"><b>기간 비교</b><span class="lg-sub">기록된 날 기준</span></div>
+          <div class="cmp-h"><b>기간 비교</b><span class="lg-sub">기록된 날 기준</span>
+            <button type="button" class="cmp-view" id="cmpView" title="왼쪽 표에 A/B 를 날짜별로 나란히 보기">표에 나란히</button></div>
           <div class="cmp-presets" id="cmpPresets">
             <button type="button" data-p="day">오늘 / 어제</button>
             <button type="button" data-p="week">이번 주 / 지난 주</button>
@@ -929,7 +1006,7 @@
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>채널</th><th>이름</th><th>내용</th><th>시각</th><th>연락처</th><th></th></tr>
+            <tr><th>채널</th><th>이름</th><th>내용</th><th>시각</th><th>연락처</th><th class="ack-h">확인</th><th></th></tr>
           </thead>
           <tbody id="rows"></tbody>
         </table>
@@ -1359,15 +1436,15 @@
           '<td class="ct">' + esc(text) + '</td>' +
           '<td class="tm">' + esc(fmtTime(r[3])) + '</td>' +
           '<td class="ph">' + (esc(r[4]) || "—") + '</td>' +
-          '<td class="go-cell">' +
+          '<td class="ack-cell">' +
             // 카카오 예약만: 고객 부재로 확정·취소를 못 해도 '확인했음'을 표시해 목록에서 뺀다
             (kind && kind.tag === "예약"
               ? '<label class="ack" title="확인한 예약 — 미확인 목록에서 빼고 \'예약대기\'로 넘깁니다">' +
                 '<input type="checkbox" data-ack="' + esc(ackKey(r)) + '" data-nm="' + esc(r[1]) + '">확인</label>'
-              : '') +
-            '<a class="go" href="' + esc(url) + '" target="_blank" rel="noopener">바로가기 ↗</a></td>' +
+              : '') + '</td>' +
+          '<td class="go-cell"><a class="go" href="' + esc(url) + '" target="_blank" rel="noopener">바로가기 ↗</a></td>' +
         '</tr>';
-      }).join("") : '<tr><td colspan="6" class="empty">미확인 상담이 없습니다 ✓</td></tr>';
+      }).join("") : '<tr><td colspan="7" class="empty">미확인 상담이 없습니다 ✓</td></tr>';
 
       renderToday(data.today, data.todayDetails);
       rendered = true;
@@ -1775,8 +1852,9 @@
     // '초진기록' 시트(A 날짜 · B 초진콜 · C 카톡 · D 합계)를 기간 단위로 보여준다.
     // 하루 한 번 쌓이는 기록이라 폴링하지 않고, 탭을 열 때만 불러온다(1분 캐시).
     // 날짜는 전부 'yyyy-MM-dd' 문자열로 다룬다(문자열 비교 = 날짜 비교).
-    const LG = { data: null, loading: false, at: 0, from: "", to: "", quick: "", cmp: "week",
-                 A: ["", ""], B: ["", ""] };
+    const LG = { data: null, loading: false, at: 0, from: "", to: "", quick: "", cmp: "d7",
+                 A: ["", ""], B: ["", ""], side: true,     // side: 표를 A/B 나란히 비교로(기본)
+                 desc: true, pt: null };                // desc: 나란히 표 최신 날짜가 위(기본) / pt: 부위 분포
     const kstToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }).format(new Date());
     const dAdd = (d, n) => {
       const t = new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8)) + n * 86400000);
@@ -1875,6 +1953,7 @@
       });
       document.getElementById("viewLive").hidden = v === "log";
       document.getElementById("viewLog").hidden = v !== "log";
+      document.body.classList.toggle("v-log", v === "log");
       try { localStorage.setItem("csView", v); } catch (e) {}
       if (v === "log") { hideTip(); loadLog(); }
     }
@@ -1888,6 +1967,10 @@
         .withSuccessHandler(d => { LG.ch = d || []; renderCh(); })
         .withFailureHandler(e => { LG.ch = []; console.error("getChojinChannels 실패", e); })
         .getChojinChannels();
+      google.script.run
+        .withSuccessHandler(d => { LG.pt = d || { rows: [], err: {} }; renderPt(); })
+        .withFailureHandler(e => { LG.pt = { rows: [], err: { a: String((e && e.message) || e), b: String((e && e.message) || e) } }; renderPt(); })
+        .getChojinParts();
       google.script.run
         .withSuccessHandler(d => {
           LG.loading = false; LG.data = d || []; LG.at = Date.now();
@@ -1907,6 +1990,7 @@
     function setRange(from, to, quick, silent) {
       if (from > to) { const t = from; from = to; to = t; }
       LG.from = from; LG.to = to; LG.quick = quick || "";
+      hideChPop();                             // 기간이 바뀌면 '기타' 펼침 내용도 달라지므로 닫는다
       if (!silent) renderLog();
     }
     function setMonth(ym, silent) {
@@ -1940,15 +2024,19 @@
         const pm = ymAdd(t.slice(0, 7), -1), pe = monthEnd(pm), same = pm + t.slice(7);
         LG.A = [t.slice(0, 8) + "01", t]; LG.B = [pm + "-01", same > pe ? pe : same];
       }
-      if (!silent) { renderCmp(); renderTable(); }
+      if (!silent) { LG.side = true; renderCmp(); renderTable(); }
     }
     document.querySelectorAll("#cmpPresets button").forEach(b =>
       b.addEventListener("click", () => setCmp(b.dataset.p)));
+    // '표에 나란히' — 왼쪽 표를 일별 기록 ↔ A/B 나란히 비교로 전환
+    document.getElementById("cmpView").addEventListener("click", () => {
+      LG.side = !LG.side; renderCmp(); renderTable();
+    });
     ["cmpAs", "cmpAe", "cmpBs", "cmpBe"].forEach(id => document.getElementById(id).addEventListener("change", () => {
       const v = k => document.getElementById(k).value;
       if (!v("cmpAs") || !v("cmpAe") || !v("cmpBs") || !v("cmpBe")) return;
       LG.A = [v("cmpAs"), v("cmpAe")].sort(); LG.B = [v("cmpBs"), v("cmpBe")].sort();
-      LG.cmp = "";
+      LG.cmp = ""; LG.side = true;
       renderCmp();
       renderTable();                           // 표의 A/B 표시 갱신
     }));
@@ -1956,6 +2044,9 @@
     function renderCmp() {
       if (!LG.data) return;
       document.querySelectorAll("#cmpPresets button").forEach(b => b.classList.toggle("on", b.dataset.p === LG.cmp));
+      const vb = document.getElementById("cmpView");
+      vb.classList.toggle("on", !!LG.side);
+      vb.textContent = LG.side ? "나란히 보기 닫기 ✕" : "표에 나란히";
       [["cmpAs", LG.A[0]], ["cmpAe", LG.A[1]], ["cmpBs", LG.B[0]], ["cmpBe", LG.B[1]]].forEach(x => {
         const el = document.getElementById(x[0]);
         el.value = x[1]; el.max = kstToday();
@@ -2057,6 +2148,7 @@
       renderTable();
       renderCmp();
       renderCh();
+      renderPt();
       syncDp();
     }
 
@@ -2080,56 +2172,110 @@
 
     // ── 유입 채널 ──
     // 저장된 날은 '초진채널' 시트, 오늘은 실시간 현황의 마우스오버 명단(20초 폴링)에서 센다.
-    //   초진콜 명단 열 = [C, H, I, K] → K(하위 구분)는 4번째, 카톡예약 명단 열 = [G, D, E, H] → E 는 3번째
+    //   초진콜 명단 열 = [C, H, I, K] → H(하위 구분)는 2번째 (K 는 상담예약 날짜), 카톡예약 명단 열 = [G, D, E, H] → E 는 3번째
+    // 빈 칸·옛 '미분류' → '미기재'
+    function chName(v) {
+      const s = String(v == null ? "" : v).trim();
+      return !s || s === "미분류" ? "미기재" : s;
+    }
     function chTodayLive() {
       const cnt = (det, i) => {
         if (!det || det.error || !det.rows) return null;
         const m = {};
-        det.rows.forEach(r => { const k = String(r[i] || "").trim() || "미분류"; m[k] = (m[k] || 0) + 1; });
+        det.rows.forEach(r => { const k = chName(r[i]); m[k] = (m[k] || 0) + 1; });
         return m;
       };
-      const a = cnt(todayDet["초진콜"], 3), b = cnt(todayDet["카톡예약"], 2);
+      const a = cnt(todayDet["초진콜"], 1), b = cnt(todayDet["카톡예약"], 2);
       return a && b ? { a: a, b: b } : null;
     }
+    // '기타' 에 마우스를 올리면 묶인 채널과 건수를 보여 준다
+    const chPop = document.createElement("div");
+    chPop.className = "ch-pop"; chPop.hidden = true;
+    document.body.appendChild(chPop);
+    // 문서 기준(absolute) 위치라 페이지를 스크롤해도 '기타' 줄 옆에 붙어 있다.
+    function showChPop(el, rest, tot) {
+      chPop.innerHTML = '<div class="ph">기타 ' + rest.length + '개' +
+        '<button type="button" class="px" title="닫기 (Esc)">✕</button></div><div class="pl">' +
+        rest.map(x =>
+          '<div class="pr"><span>' + esc(x[0]) + '</span><span><b>' + x[1] + '</b> ' + Math.round(x[1] / tot * 100) + '%</span></div>'
+        ).join("") + '</div>';
+      chPop.querySelector(".px").addEventListener("click", hideChPop);
+      chPop.hidden = false;
+      const r = el.getBoundingClientRect(), p = chPop.getBoundingClientRect();
+      const left = Math.min(r.left, innerWidth - p.width - 8);
+      const top = r.bottom + p.height + 8 > innerHeight && r.top - p.height - 6 > 0 ? r.top - p.height - 6 : r.bottom + 6;
+      chPop.style.left = Math.round(left + scrollX) + "px";
+      chPop.style.top = Math.round(top + scrollY) + "px";
+    }
+    function hideChPop() { chPop.hidden = true; }
+    addEventListener("keydown", e => { if (e.key === "Escape") hideChPop(); });
     function renderCh() {
       if (!LG.ch || !LG.from) return;
       const today = kstToday(), live = chTodayLive();
       const agg = { a: {}, b: {} };
       LG.ch.forEach(r => {
         if (r[0] < LG.from || r[0] > LG.to || (live && r[0] === today)) return;
-        agg[r[1]][r[2]] = (agg[r[1]][r[2]] || 0) + r[3];
+        const c = chName(r[2]); agg[r[1]][c] = (agg[r[1]][c] || 0) + r[3];
       });
       if (live && today >= LG.from && today <= LG.to) {
         ["a", "b"].forEach(k => Object.keys(live[k]).forEach(c => { agg[k][c] = (agg[k][c] || 0) + live[k][c]; }));
       }
-      const draw = (m, listId, totId) => {
-        const items = Object.keys(m).map(c => [c, m[c]]).sort((x, y) => y[1] - x[1]);
-        const tot = items.reduce((s, x) => s + x[1], 0);
-        document.getElementById(totId).textContent = tot + "건";
-        const el = document.getElementById(listId);
-        if (!tot) { el.innerHTML = '<div class="ch-empty">이 기간 채널 기록이 없습니다</div>'; return; }
-        // 8개 넘으면 나머지는 '기타'로 묶는다
-        let shown = items;
-        if (items.length > 8) {
-          const rest = items.slice(7).reduce((s, x) => s + x[1], 0);
-          shown = items.slice(0, 7).concat([["기타 (" + (items.length - 7) + "개)", rest]]);
-        }
-        const mx = shown.reduce((s, x) => Math.max(s, x[1]), 1);
-        el.innerHTML = shown.map(x =>
-          '<div class="ch-row' + (x[0] === "미분류" ? " none" : "") + '" title="' + esc(x[0]) + '">' +
-          '<span class="nm">' + esc(x[0]) + '</span>' +
-          '<span class="tr"><i style="width:' + (x[1] / mx * 100) + '%"></i></span>' +
-          '<span class="v"><b>' + x[1] + '</b><span>' + Math.round(x[1] / tot * 100) + '%</span></span></div>'
-        ).join("");
-      };
-      draw(agg.a, "chListA", "chTotA");
-      draw(agg.b, "chListB", "chTotB");
+      drawDist(agg.a, "chListA", "chTotA", "이 기간 채널 기록이 없습니다");
+      drawDist(agg.b, "chListB", "chTotB", "이 기간 채널 기록이 없습니다");
       document.getElementById("chSub").textContent = fmtD(LG.from) + " ~ " + fmtD(LG.to) + " · 오늘은 실시간";
+    }
+
+    function drawDist(m, listId, totId, emptyMsg) {
+      const items = Object.keys(m).map(c => [c, m[c]]).sort((x, y) => y[1] - x[1]);
+      const tot = items.reduce((s, x) => s + x[1], 0);
+      document.getElementById(totId).textContent = tot + "건";
+      const el = document.getElementById(listId);
+      if (!tot) { el.innerHTML = '<div class="ch-empty">' + esc(emptyMsg) + '</div>'; return; }
+      // 8개 넘으면 나머지는 '기타'로 묶는다
+      let shown = items, rest = [];
+      if (items.length > 8) {
+        rest = items.slice(7);
+        const etc = ["기타 (" + rest.length + "개)", rest.reduce((t, x) => t + x[1], 0)];
+        etc.etc = true;
+        shown = items.slice(0, 7).concat([etc]);
+      }
+      const mx = shown.reduce((s, x) => Math.max(s, x[1]), 1);
+      el.innerHTML = shown.map(x =>
+        '<div class="ch-row' + (x[0] === "미기재" ? " none" : "") + (x.etc ? " etc" : "") + '"' +
+        (x.etc ? '' : ' title="' + esc(x[0]) + '"') + '>' +
+        '<span class="nm">' + esc(x[0]) + '</span>' +
+        '<span class="tr"><i style="width:' + (x[1] / mx * 100) + '%"></i></span>' +
+        '<span class="v"><b>' + x[1] + '</b><span>' + Math.round(x[1] / tot * 100) + '%</span></span></div>'
+      ).join("");
+      const er = el.querySelector(".ch-row.etc");
+      if (er) {
+        er.addEventListener("mouseenter", () => showChPop(er, rest, tot));
+      }
+    }
+
+    // ── 부위 분포 ── TODAY '초진콜'(I열 부위)·'카톡' 시트를 서버가 바로 세어 준다(1분 캐시).
+    // 한 줄 = 1건. '골절+코재수술' 처럼 여러 부위가 적혀도 나누지 않고 그대로 한 항목.
+    function renderPt() {
+      if (!LG.pt || !LG.from) return;
+      const agg = { a: {}, b: {} };
+      LG.pt.rows.forEach(r => {
+        if (r[0] < LG.from || r[0] > LG.to) return;
+        const m = agg[r[1]]; m[r[2]] = (m[r[2]] || 0) + r[3];
+      });
+      const err = LG.pt.err || {};
+      drawDist(agg.a, "ptListA", "ptTotA", err.a || "이 기간 부위 기록이 없습니다");
+      drawDist(agg.b, "ptListB", "ptTotB", err.b || "이 기간 부위 기록이 없습니다");
+      document.getElementById("ptSub").textContent = fmtD(LG.from) + " ~ " + fmtD(LG.to) +
+        " · 적힌 그대로 1건씩";
     }
 
     // 표: 최근 날짜가 위. '전일 대비'는 바로 앞 기록일과 비교(기간 밖이어도).
     function renderTable() {
       if (!LG.data) return;
+      const side = !!LG.side;
+      document.getElementById("cmpTbl").hidden = !side;
+      document.getElementById("lgRows").closest("table").hidden = side;
+      if (side) { renderSide(); return; }
       const today = kstToday();
       const rows = inRange(LG.from, LG.to);
       const tb = document.getElementById("lgRows");
@@ -2159,6 +2305,50 @@
         '<tr><td>합계 · ' + rows.length + '일</td><td class="n ca">' + s.a + '</td><td class="n cb">' + s.b +
         '</td><td class="n cc">' + s.c + '</td><td></td></tr>';
     }
+
+    // 나란히 비교 표: A 기간 j번째 날 ↔ B 기간 j번째 날을 한 줄에 놓는다.
+    // (이번 주/지난 주면 같은 요일끼리, 이번 달/지난 달이면 같은 날짜끼리 맞춰진다)
+    function renderSide() {
+      const today = kstToday();
+      const byDay = {};
+      LG.data.forEach(r => { byDay[r.d] = r; });
+      const nA = dDiff(LG.A[0], LG.A[1]) + 1, nB = dDiff(LG.B[0], LG.B[1]) + 1;
+      const n = Math.max(nA, nB);
+      const half = (d, k) => {
+        const h = " h" + k, sep = k === "b" ? " sepB" : "";
+        const num = (v, c) => '<td class="n ' + c + h + (v ? "" : " z") + '">' + v + '</td>';
+        if (!d) return '<td class="na' + h + sep + '" colspan="4">—</td>';
+        const r = byDay[d], cls = "d " + k + " " + dwCls(d) + h + sep;
+        const dc = '<td class="' + cls + '">' + md(d) + '<span class="dw">(' + DOWK[dowOf(d)] + ')</span></td>';
+        if (!r) return dc + '<td class="na' + h + '" colspan="3">기록 없음</td>';
+        return dc + num(r.a, "ca") + num(r.b, "cb") + '<td class="n ' + (k === "a" ? "ta" : "tb2") + h + '">' + r.c + '</td>';
+      };
+      const sa = { a: 0, b: 0, c: 0 }, sb = { a: 0, b: 0, c: 0 };
+      let h = "";
+      document.querySelectorAll("#cmpTbl .sort-btn").forEach(b => {
+        b.querySelector("i").textContent = LG.desc ? "▼" : "▲";
+        b.title = (LG.desc ? "내림차순(최신 날짜가 위)" : "오름차순(옛 날짜가 위)") + " · 누르면 바뀜";
+      });
+      for (let k = 0; k < n; k++) {
+        const j = LG.desc ? n - 1 - k : k;
+        const da = j < nA ? dAdd(LG.A[0], j) : "", db = j < nB ? dAdd(LG.B[0], j) : "";
+        const ra = da && byDay[da], rb = db && byDay[db];
+        if (ra) { sa.a += ra.a; sa.b += ra.b; sa.c += ra.c; }
+        if (rb) { sb.a += rb.a; sb.b += rb.b; sb.c += rb.c; }
+        h += '<tr class="' + (da === today ? "today" : "") + '">' + half(da, "a") + half(db, "b") +
+          '<td class="n sepD">' + (ra && rb ? dlt(ra.c, rb.c) : '<span class="dlt same">—</span>') + '</td></tr>';
+      }
+      document.getElementById("cmpRows").innerHTML = h ||
+        '<tr><td colspan="9" class="empty">비교할 기간을 골라 주세요</td></tr>';
+      document.getElementById("cmpFoot").innerHTML =
+        '<tr><td class="ha">A 합계</td><td class="n ca ha">' + sa.a + '</td><td class="n cb ha">' + sa.b + '</td><td class="n cc ha">' + sa.c +
+        '</td><td class="sepB hb">B 합계</td><td class="n ca hb">' + sb.a + '</td><td class="n cb hb">' + sb.b +
+        '</td><td class="n hb">' + sb.c + '</td><td class="n sepD">' + dlt(sa.c, sb.c) + '</td></tr>';
+    }
+
+    document.querySelectorAll("#cmpTbl .sort-btn").forEach(b => b.addEventListener("click", () => {
+      LG.desc = !LG.desc; renderSide();
+    }));
 
     try { if (localStorage.getItem("csView") === "log") setView("log"); } catch (e) {}
 

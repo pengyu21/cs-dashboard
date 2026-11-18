@@ -101,7 +101,7 @@ function fillYear_(ss, y, folderId, kakao, ch, t0) {
         if (seen[key]) continue;
         seen[key] = 1;
         call[d] = (call[d] || 0) + 1;
-        const cn = String(disp[r][kc] || "").trim() || CH_NONE;
+        const cn = chName_(disp[r][kc]);
         const cm = callCh[d] || (callCh[d] = {});
         cm[cn] = (cm[cn] || 0) + 1;
         n++;

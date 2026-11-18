@@ -1,14 +1,20 @@
 /**
  * 유입 채널 기록 — '초진채널' 시트에 날짜별·채널별 건수를 쌓는다.
  *   초진채널: A 날짜 | B 구분('초진콜'·'카톡') | C 채널 | D 건수
- *   초진콜 채널 = '하위 구분'(K) — 드라이브 'N월 전화내역' 과 TODAY '초진콜' 시트 모두 같은 열
+ *   초진콜 채널 = '하위 구분' — 드라이브 'N월 전화내역' 은 K, TODAY '초진콜' 시트는 H (K 는 상담예약 날짜)
  *   카톡 채널   = TODAY '카톡' 시트 E열
  * 건수 기준은 초진기록과 같다(초진콜: TODAY 는 F 에 '진', 드라이브는 상담예약 채워짐 / 카톡: G 채워짐).
  */
 const CH_TAB = "초진채널";
-const CH_CALL_COL  = "K";   // TODAY '초진콜' 시트의 하위 구분
+const CH_CALL_COL  = "H";   // TODAY '초진콜' 시트의 하위 구분
 const CH_KAKAO_COL = "E";   // TODAY '카톡' 시트의 채널
-const CH_NONE = "미분류";
+const CH_NONE = "미기재";
+/** 채널 칸 값 정리: 빈 칸·옛 '미분류' → '미기재' */
+function chName_(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (!s || s === "미분류") return CH_NONE;
+  return s;
+}
 
 /** 시트 하나를 훑어 { 'yyyy-MM-dd': { 채널: 건수 } } — 행 조건은 TODAY_DETAILS 와 같다 */
 function channelByDate_(ss, spec, chCol, onlyDate) {
@@ -25,7 +31,7 @@ function channelByDate_(ss, spec, chCol, onlyDate) {
     if (!d || (onlyDate && d !== onlyDate)) continue;
     if (spec.has && !String(disp[r][colIdx_(spec.has)] || "").trim()) continue;
     if (spec.like && String(disp[r][colIdx_(spec.like[0])] || "").indexOf(spec.like[1]) < 0) continue;
-    const ch = String(disp[r][ci] || "").trim() || CH_NONE;
+    const ch = chName_(disp[r][ci]);
     const m = out[d] || (out[d] = {});
     m[ch] = (m[ch] || 0) + 1;
   }
@@ -82,11 +88,34 @@ function recordChannelsToday_(ss) {
   upsertChannelRows_(ss, channelRows_(call, kakao, [today]), [today], true);
 }
 
+/**
+ * 한 번 실행: 예전에 TODAY '초진콜' K(상담예약 날짜)를 채널로 잘못 저장한 날을 H(하위 구분)로 다시 센다.
+ * 채널 이름이 날짜 모양인 날만 고친다(드라이브로 센 정상 날짜는 그대로).
+ */
+function REPAIR_초진채널() {
+  const ss = SpreadsheetApp.openById(TODAY_ID);
+  const sh = ss.getSheetByName(CH_TAB);
+  if (!sh || sh.getLastRow() < 2) return;
+  const bad = {};
+  sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues().forEach(function (r) {
+    const d = ymd_(r[0]);
+    if (d && r[1] === "초진콜" && /^\d{4}-\d{2}-\d{2}/.test(String(r[2]).trim())) bad[d] = 1;
+  });
+  const dates = Object.keys(bad).sort();
+  if (!dates.length) { Logger.log("고칠 날짜 없음"); return; }
+  const call = channelByDate_(ss, TODAY_DETAILS["초진콜"], CH_CALL_COL);
+  const kakao = channelByDate_(ss, TODAY_DETAILS["카톡예약"], CH_KAKAO_COL);
+  upsertChannelRows_(ss, channelRows_(call, kakao, dates), dates, true);
+  Logger.log("다시 센 날짜: " + dates.join(", "));
+  dates.forEach(function (d) { Logger.log("  " + d + " " + JSON.stringify(call[d] || {})); });
+}
+
 /** 웹앱 → [[날짜, 'a'|'b', 채널, 건수], …]  (a=초진콜, b=카톡). 오늘은 화면이 실시간 명단으로 채운다. */
 function getChojinChannels() {
   const sh = SpreadsheetApp.openById(TODAY_ID).getSheetByName(CH_TAB);
   if (!sh || sh.getLastRow() < 2) return [];
   return sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues().map(function (r) {
-    return [ymd_(r[0]), r[1] === "카톡" ? "b" : "a", String(r[2]), Number(r[3]) || 0];
+    return [ymd_(r[0]), r[1] === "카톡" ? "b" : "a", chName_(r[2]), Number(r[3]) || 0];
   }).filter(function (r) { return r[0]; });
 }
+
