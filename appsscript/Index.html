@@ -807,8 +807,10 @@
     .ch-row .v span { color: var(--text-3); font-size: 12px; margin-left: 5px; }
     .ch-row.none .nm { color: var(--text-3); }
     .ch-row.etc { cursor: default; }
-    .ch-row.etc .nm { text-decoration: underline dotted var(--text-3); text-underline-offset: 3px; }
-    /* '기타' 펼침: 마우스를 올리면 열리고 ✕ 또는 Esc 로만 닫힌다(안에서 스크롤 가능) */
+    .ch-row.etc .nm { text-decoration: underline dotted var(--text-3); text-underline-offset: 3px;
+                      cursor: pointer; justify-self: start; max-width: 100%; }
+    .ch-row.etc .nm:hover { color: var(--accent); }
+    /* '기타' 펼침: 글자를 누르면 열리고 ✕ 또는 Esc(또는 글자 다시 누르기)로 닫힌다(안에서 스크롤 가능) */
     .ch-pop { position: absolute; z-index: 50; min-width: 190px; padding: 6px 4px 6px 10px;
               background: var(--surface, #fff); border: 1px solid var(--border, #e5e7eb); border-radius: 10px;
               box-shadow: 0 10px 30px -8px rgba(0,0,0,.25); font-size: 13px; }
@@ -2245,7 +2247,14 @@
       ).join("");
       const er = el.querySelector(".ch-row.etc");
       if (er) {
-        er.addEventListener("mouseenter", () => showChPop(er, rest, tot));
+        // 마우스오버는 막대를 지나갈 때도 떠서 불편 → '기타' 글자를 눌렀을 때만 연다(다시 누르면 닫힘)
+        const nm = er.querySelector(".nm");
+        nm.title = "눌러서 자세히 보기";
+        nm.addEventListener("click", () => {
+          if (!chPop.hidden && chPop.dataset.src === listId) { hideChPop(); return; }
+          showChPop(er, rest, tot);
+          chPop.dataset.src = listId;
+        });
       }
     }
 
