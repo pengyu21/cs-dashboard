@@ -39,7 +39,7 @@ function fillChojinContinue_() {
   // 채널: 카톡은 '카톡' 시트 E, 드라이브에 없는 달의 초진콜은 TODAY '초진콜' 시트 K
   const ch = {
     kakao: channelByDate_(ss, TODAY_DETAILS["카톡예약"], CH_KAKAO_COL),
-    call:  channelByDate_(ss, TODAY_DETAILS["초진콜"], CH_CALL_COL)
+    call:  channelByDate_(ss, CALL_SPEC, CH_CALL_COL)
   };
 
   const years = Object.keys(CHOJIN_FOLDERS).sort();

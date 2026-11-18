@@ -2169,7 +2169,9 @@
     }
 
     // ── 유입 채널 ──
-    // 저장된 날은 '초진채널' 시트, 오늘은 실시간 현황의 마우스오버 명단(20초 폴링)에서 센다.
+    // 초진콜: 이번 달은 서버가 TODAY '초진콜' 시트에서 상담예약 날짜(K) 채워진 줄을 바로 센다(부위 분포와 같은 기준),
+    //         지난 달은 '초진채널' 시트 저장값.
+    // 카톡: 저장된 날은 '초진채널' 시트, 오늘은 실시간 현황의 마우스오버 명단(20초 폴링)에서 센다.
     //   초진콜 명단 열 = [C, H, I, K] → H(하위 구분)는 2번째 (K 는 상담예약 날짜), 카톡예약 명단 열 = [G, D, E, H] → E 는 3번째
     // 빈 칸·옛 '미분류' → '미기재'
     function chName(v) {
@@ -2212,11 +2214,12 @@
       const today = kstToday(), live = chTodayLive();
       const agg = { a: {}, b: {} };
       LG.ch.forEach(r => {
-        if (r[0] < LG.from || r[0] > LG.to || (live && r[0] === today)) return;
+        // 초진콜은 서버가 이번 달을 시트에서 바로 세어 준다 → 오늘 실시간 덮어쓰기는 카톡만
+        if (r[0] < LG.from || r[0] > LG.to || (live && r[1] === "b" && r[0] === today)) return;
         const c = chName(r[2]); agg[r[1]][c] = (agg[r[1]][c] || 0) + r[3];
       });
       if (live && today >= LG.from && today <= LG.to) {
-        ["a", "b"].forEach(k => Object.keys(live[k]).forEach(c => { agg[k][c] = (agg[k][c] || 0) + live[k][c]; }));
+        Object.keys(live.b).forEach(c => { agg.b[c] = (agg.b[c] || 0) + live.b[c]; });
       }
       drawDist(agg.a, "chListA", "chTotA", "이 기간 채널 기록이 없습니다");
       drawDist(agg.b, "chListB", "chTotB", "이 기간 채널 기록이 없습니다");
