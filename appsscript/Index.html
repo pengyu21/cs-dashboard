@@ -716,13 +716,13 @@
     .gp .ktag.a { background: var(--c-a); } .gp .ktag.b { background: var(--c-b); color: #3f2d00; }
     .gp tr.sat td:first-child { color: #3b82f6; } .gp tr.sun td:first-child { color: var(--crit); }
     .gp tr.cur td:first-child { font-weight: 800; color: var(--accent); }
-    .gp-trend { display: flex; align-items: flex-end; gap: 3px; height: 130px; margin: 4px 0 6px;
+    .gp-trend { display: flex; align-items: flex-end; gap: 3px; height: 130px; margin: 4px 0 6px 64px;
                 border-bottom: 1px solid var(--border); padding-top: 16px; }
     .gp-trend .c { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; }
     .gp-trend .c i { width: 100%; max-width: 28px; border-radius: 4px 4px 0 0; background: var(--m0); display: block; }
     .gp-trend .c i.low { background: color-mix(in srgb, var(--m0) 35%, transparent); }
     .gp-trend .c span { font-size: 10.5px; font-weight: 700; margin-bottom: 2px; color: var(--text-2); font-variant-numeric: tabular-nums; }
-    .gp-trend-l { display: flex; gap: 3px; font-size: 10.5px; color: var(--text-3); margin-bottom: 12px; }
+    .gp-trend-l { display: flex; gap: 3px; font-size: 10.5px; color: var(--text-3); margin: 0 0 12px 64px; }
     .gp-trend-l span { flex: 1; min-width: 0; text-align: center; overflow: hidden; white-space: nowrap; }
     .gp-note { font-size: 12px; color: var(--text-3); line-height: 1.7; }
     .gp-note b { color: var(--text-2); }
@@ -744,13 +744,14 @@
     .gp td .sub { display: inline-block; min-width: 40px; text-align: left; }
     .gp-key { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 0 0 10px; font-size: 12px; color: var(--text-2); }
     .gp-key .gp-legend { margin: 0; font-size: 12px; }
+    .gp-late-pick { margin: -4px 0 14px; }
     .gp-key .sep { width: 1px; height: 14px; background: var(--border); }
     .gp-key .pc { min-width: 0; padding: 1px 7px; font-size: 11.5px; }
     /* 추이 막대: 전체 평균선 */
     .gp-trend { position: relative; }
     .gp-trend .avg { position: absolute; left: 0; right: 0; border-top: 2px dashed color-mix(in srgb, var(--text-2) 60%, transparent);
                      pointer-events: none; }
-    .gp-trend .avg b { position: absolute; right: 0; top: -18px; font-size: 11px; color: var(--text-2); background: var(--surface);
+    .gp-trend .avg b { position: absolute; left: -2px; top: -9px; transform: translateX(-100%); font-size: 11px; color: var(--text-2); background: var(--surface);
                        padding: 0 4px; border-radius: 4px; }
     .gp-trend .c i.under { background: var(--m1); }
     .gp-trend .c i.low { opacity: .35; }
@@ -1076,11 +1077,11 @@
         </div>
       </div>
     </div>
-    <!-- 상담 간격: 예약을 잡은 날(예약일) → 상담 날짜(상담일)까지 며칠. 서버 간격.js getConsultGap -->
+    <!-- 상담 간격: 상담 신청일(시트 B 날짜) → 예약일(상담 날짜)까지 며칠. 서버 간격.js getConsultGap -->
     <div id="viewGap" class="lg gp" hidden>
       <div class="lg-top">
         <h2>상담 간격</h2>
-        <span class="lg-sub" id="gpSub">예약을 잡은 날 → 상담 날짜까지 며칠</span>
+        <span class="lg-sub" id="gpSub">상담 신청일 → 예약일까지 며칠</span>
         <div class="lg-range">
           <div class="gp-seg" id="gpKind">
             <button type="button" data-k="all" class="on">전체</button>
@@ -1093,8 +1094,8 @@
             <button type="button" data-q="year">올해</button>
           </div>
           <div class="lg-dates">
-            <span class="dp" role="button" tabindex="0"><span class="dp-t"></span><input type="date" id="gpFrom" aria-label="예약일 시작"></span><span class="til">~</span>
-            <span class="dp" role="button" tabindex="0"><span class="dp-t"></span><input type="date" id="gpTo" aria-label="예약일 끝"></span>
+            <span class="dp" role="button" tabindex="0"><span class="dp-t"></span><input type="date" id="gpFrom" aria-label="신청일 시작"></span><span class="til">~</span>
+            <span class="dp" role="button" tabindex="0"><span class="dp-t"></span><input type="date" id="gpTo" aria-label="신청일 끝"></span>
           </div>
           <div class="lg-month" id="gpMonthBox">
             <button class="lg-nav" id="gpPrev" type="button" aria-label="이전 달">‹</button>
@@ -1104,14 +1105,24 @@
           <button class="lg-today" id="gpToday" type="button" title="이번 달 1일 ~ 오늘로 돌아가기">이번 달</button>
         </div>
       </div>
+      <div class="gp-key gp-late-pick">
+        <b style="color:var(--text)">늦은 예약 기준</b>
+        <div class="gp-seg" id="gpLate">
+          <button type="button" data-l="8">8일 이상</button>
+          <button type="button" data-l="15">15일 이상</button>
+          <button type="button" data-l="22">22일 이상</button>
+          <button type="button" data-l="31">31일 이상</button>
+        </div>
+        <span style="color:var(--text-3)">신청일에서 이만큼 넘게 뒤로 잡힌 예약을 이탈 위험으로 봅니다</span>
+      </div>
       <div class="lg-kpis" id="gpKpis"></div>
       <div class="card gp-insight" id="gpInsight" hidden></div>
       <div class="card gp-card">
-        <div class="lg-chart-h"><b>간격 분포</b><span class="lg-sub">비율은 상담일이 확인된 예약 기준</span></div>
+        <div class="lg-chart-h"><b>간격 분포</b><span class="lg-sub">비율은 예약일이 확인된 신청 기준</span></div>
         <div id="gpDist"><div class="ch-empty">불러오는 중…</div></div>
       </div>
       <div class="card gp-card">
-        <div class="lg-chart-h"><b>추이</b><span class="lg-sub" id="gpTrendSub">막대 = 당월 상담률</span>
+        <div class="lg-chart-h"><b>추이</b><span class="lg-sub" id="gpTrendSub"></span>
           <div class="gp-seg" id="gpUnit">
             <button type="button" data-u="day" class="on">일별</button>
             <button type="button" data-u="week">주별</button>
@@ -1122,46 +1133,37 @@
         <div class="gp-trend-l" id="gpTrendL"></div>
         <div class="gp-key" id="gpKeyT"></div>
         <div class="table-wrap gp-scroll"><table>
-          <thead><tr><th>기간</th><th class="n" title="이 기간에 잡은 예약 건수">예약</th><th title="예약일에서 상담일까지 며칠 뒤로 잡혔는지(초록=빠름 → 빨강=늦음)">언제로 잡혔나</th><th class="n" title="상담일이 예약한 달 안인 비율 — 높을수록 좋음">당월 상담률</th><th class="n" title="예약일로부터 7일 안에 상담하는 비율 — 높을수록 좋음">7일 내 상담</th><th class="n" title="보통 며칠 뒤로 잡히나(중앙값) — 짧을수록 좋음">보통 간격</th><th class="n" title="상담일이 다음 달 이후인 비율 — 이탈 위험, 낮을수록 좋음">익월 이후 ⚠</th><th class="n" title="상담 날짜를 읽지 못한 예약(빈칸·글자 등) — 비율 계산에서 뺌">날짜 미상</th></tr></thead>
+          <thead><tr id="gpHeadT"></tr></thead>
           <tbody id="gpTrendRows"></tbody><tfoot id="gpTrendFoot"></tfoot>
         </table></div>
       </div>
       <div class="card gp-card">
-        <div class="lg-chart-h"><b>채널별</b><span class="lg-sub">예약 많은 순 · 초진콜 = 하위 구분, 카톡 = 채널 칸</span></div>
+        <div class="lg-chart-h"><b>채널별</b><span class="lg-sub">신청 많은 순 · 초진콜 = 하위 구분, 카톡 = 채널 칸</span></div>
         <div class="gp-key" id="gpKeyC"></div>
         <div class="table-wrap gp-scroll"><table>
-          <thead><tr><th>채널</th><th class="n" title="이 기간에 잡은 예약 건수">예약</th><th title="예약일에서 상담일까지 며칠 뒤로 잡혔는지(초록=빠름 → 빨강=늦음)">언제로 잡혔나</th><th class="n" title="상담일이 예약한 달 안인 비율 — 높을수록 좋음">당월 상담률</th><th class="n" title="예약일로부터 7일 안에 상담하는 비율 — 높을수록 좋음">7일 내 상담</th><th class="n" title="보통 며칠 뒤로 잡히나(중앙값) — 짧을수록 좋음">보통 간격</th><th class="n" title="상담일이 다음 달 이후인 비율 — 이탈 위험, 낮을수록 좋음">익월 이후 ⚠</th><th class="n" title="상담 날짜를 읽지 못한 예약(빈칸·글자 등) — 비율 계산에서 뺌">날짜 미상</th></tr></thead>
+          <thead><tr id="gpHeadC"></tr></thead>
           <tbody id="gpChRows"></tbody><tfoot id="gpChFoot"></tfoot>
         </table></div>
       </div>
       <div class="gp-grid">
         <div class="card gp-card">
-          <div class="lg-chart-h"><b>예약한 요일별</b><span class="lg-sub">어느 요일에 잡은 예약이 빨리 오나</span></div>
+          <div class="lg-chart-h"><b>신청 요일별</b><span class="lg-sub">어느 요일에 들어온 신청이 빨리 잡히나</span></div>
           <div class="table-wrap"><table>
-            <thead><tr><th>요일</th><th class="n" title="이 기간에 잡은 예약 건수">예약</th><th title="예약일에서 상담일까지 며칠 뒤로 잡혔는지(초록=빠름 → 빨강=늦음)">언제로 잡혔나</th><th class="n" title="상담일이 예약한 달 안인 비율 — 높을수록 좋음">당월 상담률</th><th class="n" title="예약일로부터 7일 안에 상담하는 비율 — 높을수록 좋음">7일 내 상담</th><th class="n" title="보통 며칠 뒤로 잡히나(중앙값) — 짧을수록 좋음">보통 간격</th></tr></thead>
+            <thead><tr id="gpHeadD"></tr></thead>
             <tbody id="gpDowRows"></tbody>
           </table></div>
         </div>
         <div class="card gp-card">
-          <div class="lg-chart-h"><b>상담 요일별</b><span class="lg-sub">상담이 어느 요일로 잡히나</span></div>
+          <div class="lg-chart-h"><b>예약 요일별</b><span class="lg-sub">예약(상담)이 어느 요일로 잡히나</span></div>
           <div class="table-wrap"><table>
-            <thead><tr><th>요일</th><th class="n" title="이 요일로 잡힌 상담 건수">상담</th><th title="가장 많은 요일 대비">비중</th><th class="n" title="상담일이 예약한 달 안인 비율">당월 상담률</th><th class="n" title="예약일에서 이 요일 상담까지 평균 며칠">평균 간격</th></tr></thead>
+            <thead><tr id="gpHeadR"></tr></thead>
             <tbody id="gpCdowRows"></tbody>
           </table></div>
         </div>
       </div>
-      <div class="gp-grid">
-        <div class="card gp-card">
-          <div class="lg-chart-h"><b>월중 시점별</b><span class="lg-sub">월말 예약은 당월 상담 여지가 적다 — 같은 시점끼리 비교</span></div>
-          <div class="table-wrap"><table>
-            <thead><tr><th>예약일</th><th class="n" title="이 기간에 잡은 예약 건수">예약</th><th title="예약일에서 상담일까지 며칠 뒤로 잡혔는지(초록=빠름 → 빨강=늦음)">언제로 잡혔나</th><th class="n" title="상담일이 예약한 달 안인 비율 — 높을수록 좋음">당월 상담률</th><th class="n" title="예약일로부터 7일 안에 상담하는 비율 — 높을수록 좋음">7일 내 상담</th><th class="n" title="보통 며칠 뒤로 잡히나(중앙값) — 짧을수록 좋음">보통 간격</th></tr></thead>
-            <tbody id="gpStageRows"></tbody>
-          </table></div>
-        </div>
-        <div class="card gp-card">
-          <div class="lg-chart-h"><b>읽은 칸 · 기준</b></div>
-          <div class="gp-note" id="gpCols"></div>
-        </div>
+      <div class="card gp-card">
+        <div class="lg-chart-h"><b>읽은 칸 · 기준</b></div>
+        <div class="gp-note" id="gpCols"></div>
       </div>
     </div>
     <div id="viewLive">
@@ -2562,10 +2564,11 @@
 
 
     // ── 상담 간격 화면 ──────────────────────────────────────────
-    // 서버(간격.js getConsultGap) → rows: [예약일, 'a'|'b', 채널, 상담일('' = 못 읽음)]
-    // 간격 = 상담일 − 예약일(일). 당월 상담 = 상담일이 예약한 달 안. 익월 이후 = 다음 달 이후(이탈 위험).
-    // 비율은 상담일을 읽은 예약 기준(미상은 따로 센다).
-    const GP = { from: "", to: "", quick: "", kind: "all", unit: "day", cache: {} };
+    // 서버(간격.js getConsultGap) → rows: [신청일, 'a'|'b', 채널, 예약일('' = 못 읽음)]
+    // 간격 = 예약일 − 신청일(일). 달이 바뀌는지는 보지 않는다(11/30 신청 → 12/1 예약 = 1일, 빠른 예약).
+    // 늦은 예약 = 간격이 GP.late 일 이상(이탈 위험, 화면에서 기준 선택). 비율은 예약일을 읽은 신청 기준.
+    const GP = { from: "", to: "", quick: "", kind: "all", unit: "day", late: 15, cache: {} };
+    try { const l = +localStorage.getItem("gpLate"); if ([8, 15, 22, 31].indexOf(l) > -1) GP.late = l; } catch (e) {}
     const GP_B = [                                       // 간격 구간: 빠를수록 초록 → 늦을수록 빨강
       { l: "당일", t: g => g === 0, c: "var(--g0)" },
       { l: "1~3일", t: g => g >= 1 && g <= 3, c: "var(--g1)" },
@@ -2574,8 +2577,6 @@
       { l: "15~30일", t: g => g >= 15 && g <= 30, c: "var(--g4)" },
       { l: "31일 이상", t: g => g >= 31, c: "var(--g5)" }
     ];
-    const GP_M = [["당월", "var(--m0)"], ["익월", "var(--m1)"], ["2개월 이후", "var(--m2)"]];
-    const ymNum = d => +d.slice(0, 4) * 12 + (+d.slice(5, 7));
     const pctS = (n, d) => d ? Math.round(n / d * 100) : null;
     // 비율 칸: 전체(base %)보다 5%p 이상 좋으면 초록, 나쁘면 빨강. hi = 높을수록 좋은 지표인가
     const pctH = (n, d, base, hi) => {
@@ -2592,26 +2593,26 @@
     const dayS = v => v == null ? "—" : (Math.round(v * 10) / 10) + "일";
 
     function gpStat(list) {
-      const s = { n: list.length, k: 0, b: GP_B.map(() => 0), m: [0, 0, 0], w7: 0, sum: 0, gs: [] };
+      const s = { n: list.length, k: 0, b: GP_B.map(() => 0), w3: 0, w7: 0, late: 0, sum: 0, gs: [] };
       list.forEach(r => {
         if (!r.c) return;
-        s.k++;
         const g = r.g;
-        s.sum += g; s.gs.push(g);
+        s.k++; s.sum += g; s.gs.push(g);
+        if (g <= 3) s.w3++;
         if (g <= 7) s.w7++;
+        if (g >= GP.late) s.late++;
         const bi = GP_B.findIndex(b => b.t(g)); if (bi > -1) s.b[bi]++;
-        s.m[Math.min(2, r.mo)]++;
       });
       s.x = s.n - s.k;
+      s.mid = s.k - s.w7 - s.late;                        // 8일 ~ 기준 미만
       s.avg = s.k ? s.sum / s.k : null;
       if (s.k) {
         const a = s.gs.slice().sort((x, y) => x - y), h = a.length >> 1;
         s.med = a.length % 2 ? a[h] : (a[h - 1] + a[h]) / 2;
       } else s.med = null;
-      s.same = s.m[0]; s.later = s.m[1] + s.m[2];
       return s;
     }
-    // 작은 100% 막대(구간 6개) — 마우스를 올리면 구간별 건수
+    // 100% 막대(구간 6개) — 마우스를 올리면 구간별 건수
     function gpStk(s, big) {
       if (!s.k) return '<div class="gp-stk' + (big ? " big" : "") + '"></div>';
       return '<div class="gp-stk' + (big ? " big" : "") + '">' + GP_B.map((b, i) => {
@@ -2628,8 +2629,7 @@
       const c = GP.cache[GP.from + "|" + GP.to];
       if (!c || !c.d) return null;
       return c.d.rows.filter(r => r[0] >= GP.from && r[0] <= GP.to && (GP.kind === "all" || r[1] === GP.kind))
-        .map(r => ({ d: r[0], k: r[1], ch: r[2] || "미기재", c: r[3] || "",
-                     g: r[3] ? dDiff(r[0], r[3]) : null, mo: r[3] ? ymNum(r[3]) - ymNum(r[0]) : null }));
+        .map(r => ({ d: r[0], k: r[1], ch: r[2] || "미기재", c: r[3] || "", g: r[3] ? dDiff(r[0], r[3]) : null }));
     }
 
     function gpSetRange(from, to, quick) {
@@ -2641,7 +2641,6 @@
       const t = kstToday(), e = monthEnd(ym);
       gpSetRange(ym + "-01", e > t ? t : e, "");
     }
-
     function loadGap() {
       if (!GP.from) { const t = kstToday(); GP.from = t.slice(0, 8) + "01"; GP.to = t; }
       renderGap();
@@ -2666,12 +2665,14 @@
           })
           .getConsultGap(GP.from, GP.to);
       }
-      // 위쪽 조작부
+      const L = GP.late, LATE = L + "일 이상";
+      // ── 위쪽 조작부 ──
       document.getElementById("gpFrom").value = GP.from; document.getElementById("gpTo").value = GP.to;
       document.getElementById("gpFrom").max = today; document.getElementById("gpTo").max = today;
       document.querySelectorAll("#gpQuick button").forEach(b => b.classList.toggle("on", b.dataset.q === GP.quick));
       document.querySelectorAll("#gpKind button").forEach(b => b.classList.toggle("on", b.dataset.k === GP.kind));
       document.querySelectorAll("#gpUnit button").forEach(b => b.classList.toggle("on", b.dataset.u === GP.unit));
+      document.querySelectorAll("#gpLate button").forEach(b => b.classList.toggle("on", +b.dataset.l === L));
       const ym = GP.from.slice(0, 7), me = monthEnd(ym);
       const isMonth = GP.from.slice(8) === "01" && GP.to.slice(0, 7) === ym && (GP.to === me || GP.to === today);
       document.getElementById("gpMonth").textContent = ym.slice(0, 4) + "년 " + (+ym.slice(5)) + "월";
@@ -2679,22 +2680,39 @@
       document.getElementById("gpNext").disabled = ym >= today.slice(0, 7);
       document.getElementById("gpToday").classList.toggle("at", GP.from === today.slice(0, 8) + "01" && GP.to === today);
       syncDp();
-      document.getElementById("gpSub").textContent = fmtD(GP.from) + " ~ " + fmtD(GP.to) + " 에 잡은 예약";
+      document.getElementById("gpSub").textContent = fmtD(GP.from) + " ~ " + fmtD(GP.to) + " 에 들어온 상담 신청";
+
+      // ── 표 머리글(기준 일수가 바뀌면 이름도 바뀐다) ──
+      const TH = {
+        n: '<th class="n" title="이 기간에 들어온 상담 신청 건수">신청</th>',
+        bar: '<th title="신청일에서 예약일까지 며칠 뒤로 잡혔는지(초록=빠름 → 빨강=늦음)">언제로 잡혔나</th>',
+        w3: '<th class="n" title="신청일로부터 3일 안으로 예약된 비율 — 높을수록 좋음">3일 내</th>',
+        w7: '<th class="n" title="신청일로부터 7일 안으로 예약된 비율 — 높을수록 좋음">7일 내</th>',
+        med: '<th class="n" title="보통 며칠 뒤로 잡히나(중앙값) — 짧을수록 좋음">보통 간격</th>',
+        late: '<th class="n" title="신청일로부터 ' + LATE + ' 뒤로 잡힌 비율 — 이탈 위험, 낮을수록 좋음">' + LATE + ' ⚠</th>',
+        x: '<th class="n" title="예약일을 읽지 못한 신청(빈칸·글자 등) — 비율 계산에서 뺌">날짜 미상</th>'
+      };
+      const headFull = TH.n + TH.bar + TH.w3 + TH.w7 + TH.med + TH.late + TH.x;
+      document.getElementById("gpHeadT").innerHTML = '<th>기간</th>' + headFull;
+      document.getElementById("gpHeadC").innerHTML = '<th>채널</th>' + headFull;
+      document.getElementById("gpHeadD").innerHTML = '<th>요일</th>' + TH.n + TH.bar + TH.w7 + TH.med + TH.late;
+      document.getElementById("gpHeadR").innerHTML = '<th>요일</th><th class="n" title="이 요일로 잡힌 예약 건수">예약</th>' +
+        '<th title="가장 많은 요일 대비">비중</th>' + TH.w7 + '<th class="n" title="신청일에서 이 요일 예약까지 평균 며칠">평균 간격</th>';
 
       const rows = gpRows();
-      const ids = ["gpTrendRows", "gpChRows", "gpDowRows", "gpCdowRows", "gpStageRows"];
+      const ids = ["gpTrendRows", "gpChRows", "gpDowRows", "gpCdowRows"];
       if (!rows) {
         document.getElementById("gpKpis").innerHTML = "";
         document.getElementById("gpInsight").hidden = true;
         document.getElementById("gpDist").innerHTML = '<div class="ch-empty">불러오는 중… (지난 달은 처음 한 번 몇 초 걸려요)</div>';
         document.getElementById("gpTrend").innerHTML = document.getElementById("gpTrendL").innerHTML = "";
-        document.getElementById("gpTrendFoot").innerHTML = "";
+        document.getElementById("gpTrendFoot").innerHTML = document.getElementById("gpChFoot").innerHTML = "";
         ids.forEach(id => { document.getElementById(id).innerHTML = '<tr><td colspan="8" class="empty">불러오는 중…</td></tr>'; });
-        document.getElementById("gpChFoot").innerHTML = "";
         return;
       }
       const D = GP.cache[key].d;
       const S = gpStat(rows);
+      const B0 = { w3: pctS(S.w3, S.k), w7: pctS(S.w7, S.k), late: pctS(S.late, S.k) };   // 전체 기준
 
       // ── 핵심 숫자 ──
       const kpi = (label, v, unit, sub, color, hero) =>
@@ -2702,34 +2720,35 @@
         '<span class="k-l">' + label + '</span><b class="k-v">' + v + '<small>' + unit + '</small></b>' +
         '<span class="k-s">' + sub + '</span></div>';
       const pv = (n, d) => d ? Math.round(n / d * 100) : "—";
+      const pu = S.k ? "%" : "";
       document.getElementById("gpKpis").innerHTML =
-        kpi("당월 상담률", pv(S.same, S.k), S.k ? "%" : "", "예약한 달 안에 상담 · " + S.same + "건 / " + S.k + "건", "var(--m0)", true) +
-        kpi("7일 내 상담", pv(S.w7, S.k), S.k ? "%" : "", "예약하고 일주일 안에 상담 · " + S.w7 + "건", "var(--g1)") +
+        kpi("7일 내 예약", pv(S.w7, S.k), pu, "신청하고 일주일 안에 상담 · " + S.w7 + "건 / " + S.k + "건", "var(--g1)", true) +
+        kpi("3일 내 예약", pv(S.w3, S.k), pu, "당일 포함 · " + S.w3 + "건", "var(--g0)") +
         kpi("보통 간격", S.med == null ? "—" : Math.round(S.med * 10) / 10, "일 뒤", "중앙값 · 평균 " + dayS(S.avg), "#64748b") +
-        kpi("익월 이후 상담 ⚠", pv(S.later, S.k), S.k ? "%" : "", "이탈 위험 " + S.later + "건 · 그중 2개월 이후 " + S.m[2] + "건", "var(--m2)") +
-        kpi("예약", S.n, "건", S.x ? "상담일 미상 " + S.x + "건" : "모두 상담일 확인", "var(--c-c)");
+        kpi("늦은 예약 ⚠", pv(S.late, S.k), pu, LATE + " 뒤 · 이탈 위험 " + S.late + "건", "var(--m2)") +
+        kpi("상담 신청", S.n, "건", S.x ? "예약일 미상 " + S.x + "건" : "모두 예약일 확인", "var(--c-c)");
 
       // ── 분포 ──
-      document.getElementById("gpDist").innerHTML = !S.k ? '<div class="ch-empty">이 기간에 상담일이 확인된 예약이 없습니다</div>' :
+      const sp = [["빠름 (7일 내)", "var(--g1)", S.w7], ["보통 (8일~" + (L - 1) + "일)", "var(--g3)", S.mid], ["늦음 (" + LATE + ")", "var(--g5)", S.late]]
+        .filter(x => L > 8 || x[0].indexOf("보통") < 0);
+      document.getElementById("gpDist").innerHTML = !S.k ? '<div class="ch-empty">이 기간에 예약일이 확인된 신청이 없습니다</div>' :
+        '<div class="gp-dist"><h4>빠름 · 보통 · 늦음</h4><div class="gp-stk big">' + sp.map(x => {
+            const v = x[2]; if (!v) return ""; const p = v / S.k * 100;
+            return '<i style="width:' + p + '%;background:' + x[1] + '" title="' + x[0] + ' ' + v + '건">' + (p >= 8 ? x[0].split(" ")[0] + " " + Math.round(p) + "%" : p >= 4 ? Math.round(p) + "%" : "") + '</i>';
+          }).join("") + '</div>' + gpLegend(sp.map(x => [x[0], x[1], x[2] + "건"])) + '</div>' +
         '<div class="gp-dist"><h4>며칠 뒤로 잡혔나</h4>' + gpStk(S, true) +
-          gpLegend(GP_B.map((b, i) => [b.l, b.c, S.b[i] + "건"]).concat(S.x ? [["상담일 미상", "var(--gx)", S.x + "건"]] : [])) + '</div>' +
-        '<div class="gp-dist"><h4>어느 달로 잡혔나</h4><div class="gp-stk big">' + GP_M.map((m, i) => {
-            const v = S.m[i]; if (!v) return ""; const p = v / S.k * 100;
-            return '<i style="width:' + p + '%;background:' + m[1] + '" title="' + m[0] + ' ' + v + '건">' + (p >= 6 ? m[0] + " " + Math.round(p) + "%" : "") + '</i>';
-          }).join("") + '</div>' +
-          gpLegend(GP_M.map((m, i) => [m[0], m[1], S.m[i] + "건"])) + '</div>';
+          gpLegend(GP_B.map((b, i) => [b.l, b.c, S.b[i] + "건"]).concat(S.x ? [["예약일 미상", "var(--gx)", S.x + "건"]] : [])) + '</div>';
 
       // ── 공통 표 줄 ──
-      const B0 = { same: pctS(S.same, S.k), w7: pctS(S.w7, S.k), later: pctS(S.later, S.k) };   // 전체 기준
       const statCells = (s, full, plain) => {
         const b = plain ? {} : B0;
         return '<td class="n">' + s.n + '</td><td class="bar">' + gpStk(s) + '</td>' +
-          '<td class="n">' + pctH(s.same, s.k, b.same, true) + '</td><td class="n">' + pctH(s.w7, s.k, b.w7, true) + '</td>' +
+          (full ? '<td class="n">' + pctH(s.w3, s.k, b.w3, true) + '</td>' : "") +
+          '<td class="n">' + pctH(s.w7, s.k, b.w7, true) + '</td>' +
           '<td class="n">' + dayS(s.med) + '</td>' +
-          (full ? '<td class="n">' + pctH(s.later, s.k, b.later, false) + '</td>' +
-                  '<td class="n"><span class="sub">' + (s.x ? s.x + "건" : "—") + '</span></td>' : "");
+          '<td class="n">' + pctH(s.late, s.k, b.late, false) + '</td>' +
+          (full ? '<td class="n"><span class="sub">' + (s.x ? s.x + "건" : "—") + '</span></td>' : "");
       };
-      // 표 위 범례: 막대 색 + 배지 색 뜻
       const keyHtml = '<span class="gp-legend">' + GP_B.map(b => '<span><i style="background:' + b.c + '"></i>' + b.l + '</span>').join("") + '</span>' +
         '<span class="sep"></span><span><span class="pc good">초록</span> 전체보다 좋음</span>' +
         '<span><span class="pc bad">빨강</span> 전체보다 나쁨</span>' +
@@ -2757,19 +2776,19 @@
       const stats = periods.map(p => ({ p: p, s: gpStat(gm[p] || []) }));
       const every = Math.ceil(stats.length / 31);
       document.getElementById("gpTrend").style.gap = document.getElementById("gpTrendL").style.gap = stats.length > 45 ? "1px" : "3px";
-      // 막대 = 당월 상담률. 전체 평균(점선) 이상이면 청록, 밑이면 주황
-      const avgP = B0.same;
+      // 막대 = 7일 내 예약 비율. 전체 평균(점선) 이상이면 청록, 밑이면 주황
+      const avgP = B0.w7;
       document.getElementById("gpTrend").innerHTML = stats.map(x => {
-        const p = pctS(x.s.same, x.s.k);
+        const p = pctS(x.s.w7, x.s.k);
         const cls = (x.s.k < 3 ? "low " : "") + (p != null && avgP != null && p < avgP ? "under" : "");
-        return '<div class="c" title="' + esc(labOf(x.p)) + '  예약 ' + x.s.n + '건 · 당월 상담률 ' + (p == null ? "—" : p + "%") +
-          ' · 7일 내 상담 ' + (x.s.k ? pctS(x.s.w7, x.s.k) + "%" : "—") + '">' +
+        return '<div class="c" title="' + esc(labOf(x.p)) + '  신청 ' + x.s.n + '건 · 7일 내 ' + (p == null ? "—" : p + "%") +
+          ' · ' + LATE + ' ' + (x.s.k ? pctS(x.s.late, x.s.k) + "%" : "—") + ' · 보통 ' + dayS(x.s.med) + '">' +
           (stats.length <= 45 && p != null ? '<span>' + p + '%</span>' : "") +
           '<i class="' + cls + '" style="height:' + (p || 0) + '%"></i></div>';
       }).join("") + (avgP != null ? '<div class="avg" style="bottom:' + avgP + '%"><b>전체 ' + avgP + '%</b></div>' : "");
       document.getElementById("gpTrendL").innerHTML = stats.map((x, i) =>
         '<span>' + (i % every ? "" : esc(U === "day" ? md(x.p) : labOf(x.p))) + '</span>').join("");
-      document.getElementById("gpTrendSub").textContent = "막대 = 당월 상담률 · 점선 = 전체 평균 · 주황 = 평균보다 낮음 · 흐린 막대 = 3건 미만";
+      document.getElementById("gpTrendSub").textContent = "막대 = 7일 내 예약 비율 · 점선 = 전체 평균 · 주황 = 평균보다 낮음 · 흐린 막대 = 3건 미만";
       document.getElementById("gpTrendRows").innerHTML = stats.slice().reverse().map(x => {
         const w = U === "day" ? dowOf(x.p) : -1;
         const cls = (x.p === curP ? "cur " : "") + (w === 6 ? "sat" : w === 0 ? "sun" : "");
@@ -2785,51 +2804,41 @@
         statCells(x.s, true) + '</tr>').join("") || '<tr><td colspan="8" class="empty">기록이 없습니다</td></tr>';
       document.getElementById("gpChFoot").innerHTML = chs.length ? '<tr><td><b>전체</b></td>' + statCells(S, true, true) + '</tr>' : "";
 
-      // ── 예약한 요일별 ──
+      // ── 신청 요일별 ──
       const ORD = [1, 2, 3, 4, 5, 6, 0];
       const gd = group(r => dowOf(r.d));
       const dws = ORD.map(w => ({ w: w, s: gpStat(gd[w] || []) }));
       document.getElementById("gpDowRows").innerHTML = dws.map(x =>
         '<tr class="' + (x.w === 6 ? "sat" : x.w === 0 ? "sun" : "") + '"><td>' + DOWK[x.w] + '요일</td>' + statCells(x.s, false) + '</tr>').join("");
 
-      // ── 상담 요일별 ──
-      const known = rows.filter(r => r.c);
+      // ── 예약 요일별 ──
       const gcd = {};
-      known.forEach(r => { const w = dowOf(r.c); (gcd[w] || (gcd[w] = [])).push(r); });
+      rows.filter(r => r.c).forEach(r => { const w = dowOf(r.c); (gcd[w] || (gcd[w] = [])).push(r); });
       const maxC = Math.max(1, ...ORD.map(w => (gcd[w] || []).length));
       document.getElementById("gpCdowRows").innerHTML = ORD.map(w => {
         const l = gcd[w] || [], s = gpStat(l);
         return '<tr class="' + (w === 6 ? "sat" : w === 0 ? "sun" : "") + '"><td>' + DOWK[w] + '요일</td><td class="n">' + l.length + '</td>' +
           '<td class="bar"><div class="gp-stk"><i style="width:' + (l.length / maxC * 100) + '%;background:var(--c-c)"></i></div></td>' +
-          '<td class="n">' + pctH(s.same, s.k, B0.same, true) + '</td><td class="n">' + dayS(s.avg) + '</td></tr>';
+          '<td class="n">' + pctH(s.w7, s.k, B0.w7, true) + '</td><td class="n">' + dayS(s.avg) + '</td></tr>';
       }).join("");
 
-      // ── 월중 시점별(예약일 기준) ──
-      const STG = [["1~10일", d => +d.slice(8) <= 10], ["11~20일", d => +d.slice(8) >= 11 && +d.slice(8) <= 20], ["21일~말일", d => +d.slice(8) >= 21]];
-      const stg = STG.map(x => ({ l: x[0], s: gpStat(rows.filter(r => x[1](r.d))) }));
-      document.getElementById("gpStageRows").innerHTML = stg.map(x => '<tr><td>' + x.l + '</td>' + statCells(x.s, false) + '</tr>').join("");
-
       // ── 한눈에 보기(자동 요약) ──
-      const ins = [];
-      const MIN = 5;
+      const ins = [], MIN = 5;
       const okCh = chs.filter(x => x.s.k >= MIN);
       if (okCh.length >= 2) {
-        const by = okCh.slice().sort((a, b) => b.s.same / b.s.k - a.s.same / a.s.k);
+        const by = okCh.slice().sort((a, b) => b.s.w7 / b.s.k - a.s.w7 / a.s.k);
         const nm = x => (x.k[0] === "a" ? "콜 " : "카톡 ") + x.k[1];
-        ins.push("당월 상담률이 가장 높은 채널은 <b>" + esc(nm(by[0])) + "</b> (" + pctS(by[0].s.same, by[0].s.k) + "%), 가장 낮은 채널은 <b>" +
-          esc(nm(by[by.length - 1])) + "</b> (" + pctS(by[by.length - 1].s.same, by[by.length - 1].s.k) + "%) — 상담일 확인 " + MIN + "건 이상 채널 기준");
+        const hi = by[0], lo = by[by.length - 1];
+        ins.push("7일 내 예약 비율이 가장 높은 채널은 <b>" + esc(nm(hi)) + "</b> (" + pctS(hi.s.w7, hi.s.k) + "%), 가장 낮은 채널은 <b>" +
+          esc(nm(lo)) + "</b> (" + pctS(lo.s.w7, lo.s.k) + "%, 보통 " + dayS(lo.s.med) + " 뒤) — 예약일 확인 " + MIN + "건 이상 채널 기준");
       }
       const okD = dws.filter(x => x.s.k >= MIN);
       if (okD.length >= 2) {
-        const by = okD.slice().sort((a, b) => a.s.avg - b.s.avg);
-        ins.push("평균 간격이 가장 짧은 예약 요일은 <b>" + DOWK[by[0].w] + "요일</b> (" + dayS(by[0].s.avg) + "), 가장 긴 요일은 <b>" +
-          DOWK[by[by.length - 1].w] + "요일</b> (" + dayS(by[by.length - 1].s.avg) + ")");
+        const by = okD.slice().sort((a, b) => a.s.med - b.s.med || a.s.avg - b.s.avg);
+        ins.push("보통 간격이 가장 짧은 신청 요일은 <b>" + DOWK[by[0].w] + "요일</b> (" + dayS(by[0].s.med) + "), 가장 긴 요일은 <b>" +
+          DOWK[by[by.length - 1].w] + "요일</b> (" + dayS(by[by.length - 1].s.med) + ")");
       }
-      if (stg[0].s.k >= MIN && stg[2].s.k >= MIN) {
-        ins.push("월초(1~10일) 예약의 당월 상담률 " + pctS(stg[0].s.same, stg[0].s.k) + "% · 월말(21일~) " + pctS(stg[2].s.same, stg[2].s.k) +
-          "% — 월말엔 7일 이내 비율(" + pctS(stg[2].s.w7, stg[2].s.k) + "%)로 보는 게 공정합니다");
-      }
-      if (S.m[2]) ins.push("2개월 이후로 잡힌 예약 <b>" + S.m[2] + "건</b> — 앞당기기 연락 대상");
+      if (S.late) ins.push(LATE + " 뒤로 잡힌 예약 <b>" + S.late + "건</b> (" + pctS(S.late, S.k) + "%) — 앞당기기 연락 대상");
       const insEl = document.getElementById("gpInsight");
       insEl.hidden = !ins.length;
       insEl.innerHTML = ins.map(x => "<div>" + x + "</div>").join("");
@@ -2840,14 +2849,20 @@
         (err[k] ? '<span style="color:var(--crit)">' + esc(err[k]) + '</span>' : esc(col[k] || "—")) + '</div>';
       document.getElementById("gpCols").innerHTML =
         line("a", "초진콜") + line("b", "카톡") +
-        '<div style="margin-top:8px">· 예약일 = 예약을 잡은 날(시트 B열 날짜), 상담일 = 상담 예약 날짜 칸. 간격 = 상담일 − 예약일</div>' +
-        '<div>· <b>당월 상담</b> = 상담일이 예약한 달 안 · <b>익월 이후</b> = 다음 달 이후(이탈 위험)</div>' +
-        '<div>· 비율은 상담일이 읽힌 예약 기준. 날짜로 못 읽은 칸(빈칸·글자·0~365일 밖)은 <b>미상</b></div>' +
-        '<div>· 연도 없이 \'12/3\' 처럼 적힌 날짜는 예약일 연도로 보고, 예약일보다 한 달 넘게 앞서면 다음 해로 봅니다</div>';
+        '<div style="margin-top:8px">· <b>신청일</b> = 상담 신청이 들어온 날(시트 B열 날짜), <b>예약일</b> = 상담 예약 날짜 칸. <b>간격</b> = 예약일 − 신청일(일)</div>' +
+        '<div>· 달이 바뀌는지는 보지 않습니다 — 11/30 신청 → 12/1 예약은 1일(빠른 예약)</div>' +
+        '<div>· <b>늦은 예약</b> = 간격이 위에서 고른 기준(' + LATE + ') — 이탈 위험</div>' +
+        '<div>· 비율은 예약일이 읽힌 신청 기준. 날짜로 못 읽은 칸(빈칸·글자·0~365일 밖)은 <b>날짜 미상</b></div>' +
+        '<div>· 연도 없이 \'12/3\' 처럼 적힌 날짜는 신청일 연도로 보고, 신청일보다 한 달 넘게 앞서면 다음 해로 봅니다</div>';
     }
 
     document.querySelectorAll("#gpKind button").forEach(b => b.addEventListener("click", () => { GP.kind = b.dataset.k; renderGap(); }));
     document.querySelectorAll("#gpUnit button").forEach(b => b.addEventListener("click", () => { GP.unit = b.dataset.u; renderGap(); }));
+    document.querySelectorAll("#gpLate button").forEach(b => b.addEventListener("click", () => {
+      GP.late = +b.dataset.l;
+      try { localStorage.setItem("gpLate", GP.late); } catch (e) {}
+      renderGap();
+    }));
     document.querySelectorAll("#gpQuick button").forEach(b => b.addEventListener("click", () => {
       const t = kstToday(), q = b.dataset.q;
       gpSetRange(q === "year" ? t.slice(0, 4) + "-01-01" : dAdd(t, -(+q - 1)), t, q);
