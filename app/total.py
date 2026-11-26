@@ -4334,8 +4334,16 @@ class KakaoTalkChannel(BaseChannel):
         from selenium.webdriver.support import expected_conditions as EC
         from selenium.webdriver.support.ui import WebDriverWait
 
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "a.link_chat")))
+        self.header_cells["F1"] = ""            # 지난 사이클의 예약 경고는 매번 새로 판단
+        try:
+            WebDriverWait(driver, 20).until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "a.link_chat")))
+        except Exception as e:
+            # 추가 인증·안내 화면에 막히면 accounts.kakao.com 이 아니라 '로그인됨'으로
+            # 보이고, 여기서 빈 메시지의 '시간 초과'로만 끝났다 → 어디에 걸렸는지 남긴다.
+            raise RuntimeError(
+                f"채팅 목록이 20초 안에 안 열렸습니다 — 추가 인증/안내 화면일 수 있습니다 "
+                f"(현재 주소: {driver.current_url} · 제목: {driver.title[:40]})") from e
         time.sleep(1.5)
 
         out = []
@@ -4353,10 +4361,22 @@ class KakaoTalkChannel(BaseChannel):
         # ── 카카오 예약(확정대기)도 같은 탭에서 이어서 수집 ──────────
         # 예약 쪽이 깨져도 채팅 결과는 살린다(전체를 실패로 만들지 않음).
         # 다음 사이클에 BrowserHub 가 LIST_URL 로 다시 열므로 되돌릴 필요 없다.
+        # ⚠️ 예전엔 실패를 로그에만 찍고 넘어가 예약 건이 대시보드에서 소리 없이
+        #    사라졌다(예약하기 쪽만 추가 인증이 걸렸을 때). 이제는
+        #    · 지난번에 읽은 예약 건을 그대로 유지하고
+        #    · 비고(F1)에 사유를 띄워 웹앱 타일에서 바로 보이게 한다.
         try:
-            out.extend(self.scrape_bookings(driver))
+            books = self.scrape_bookings(driver)
+            self._last_bookings = books
+            out.extend(books)
         except Exception as e:
-            print(f"[{self.name}] 카카오 예약 수집 건너뜀: {classify_error(e).detail}")
+            err = classify_error(e)
+            print(f"[{self.name}] 카카오 예약 수집 실패(지난 값 유지): {err.detail}")
+            keep = getattr(self, "_last_bookings", None) or []
+            self.header_cells["F1"] = (
+                f"⚠️ 카카오 예약 확인 불가({err.kind}) — 예약하기 재로그인/추가인증 필요"
+                + (f" · 지난 {len(keep)}건 표시중" if keep else ""))
+            out.extend(keep)
         return out
 
     # ── 카카오 예약 페이지 ─────────────────────────────────────
@@ -4439,12 +4459,27 @@ return {heads: heads, rows: rows, pend: pend};
 
         load_page(driver, self.BOOKING_URL, label=self.name)
         if self._at_login(driver):
-            raise RuntimeError("카카오 예약 페이지가 로그인 화면으로 넘어갔습니다")
+            # 예약하기만 세션이 따로 끊긴 경우: '계정 선택' 화면이면 내 계정만 눌러본다.
+            # (비번 제출·2단계 인증 대기는 하지 않는다 — 채팅 수집까지 멈추면 안 되므로)
+            try:
+                WebDriverWait(driver, 8).until(
+                    lambda d: self._account_rows(d) or self._at_login_form(d))
+            except Exception:
+                pass
+            if self._account_rows(driver) and self._clear_account_picker(driver):
+                print(f"[{self.name}] 카카오 예약: 계정 선택으로 재로그인 → 다시 열기")
+                load_page(driver, self.BOOKING_URL, label=self.name)
+            if self._at_login(driver):
+                raise RuntimeError(
+                    "카카오 예약 페이지가 로그인(추가 인증) 화면으로 넘어갔습니다"
+                    f" — 수동 로그인 필요(현재 주소: {driver.current_url[:80]})")
         try:            # redirect → /reservation 으로 넘어가 표가 뜰 때까지
             WebDriverWait(driver, 20).until(EC.presence_of_element_located(
                 (By.CSS_SELECTOR, ".list_status .txt_status, .table_reserve table")))
         except Exception:
-            raise RuntimeError(f"예약 목록이 안 열렸습니다(현재 주소: {driver.current_url})")
+            raise RuntimeError(f"예약 목록이 안 열렸습니다 — 추가 인증/안내 화면일 수 있습니다"
+                               f"(현재 주소: {driver.current_url[:80]} · "
+                               f"제목: {driver.title[:40]})")
         # 표·숫자는 비동기로 채워진다 → 확정대기 숫자만큼 행이 뜰 때까지 잠깐 기다림
         items, pend = [], None
         end = time.monotonic() + 10

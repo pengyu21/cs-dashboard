@@ -1,10 +1,10 @@
 {
-  "version": "1.0.43",
-  "notes": "카카오 예약: 파트너 지정 redirect 주소로 열기(/booking 튕김 수정)",
+  "version": "1.0.44",
+  "notes": "카카오 예약: 추가인증 실패 시 지난 예약 유지+비고 경고, 계정선택 자동통과",
   "files": [
     {
       "name": "total.py",
-      "sha256": "dea0dae4e3ec4939455ab758e0472ec3d47fd67f9a83b071b903ac40690d860e"
+      "sha256": "3f73cd3a08f73ff0f58f8f201ec4ab413c741699bcdcacd058657bde8ccdd3ed"
     },
     {
       "name": "runner.py",
